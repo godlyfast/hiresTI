@@ -378,9 +378,9 @@ fi
 # 4. 捆绑依赖
 echo "📦 Bundling Python dependencies..."
 mkdir -p "$INSTALL_DIR/libs"
-if ! pip3 install tidalapi requests urllib3 PyOpenGL pystray pillow qrcode python-dateutil typing-extensions isodate mpegdash pyaes ratelimit six setproctitle -t "$INSTALL_DIR/libs" --no-cache-dir --upgrade 2>/dev/null; then
+if ! pip3 install requests urllib3 PyOpenGL pystray pillow qrcode python-dateutil typing-extensions isodate mpegdash pyaes ratelimit six setproctitle -t "$INSTALL_DIR/libs" --no-cache-dir --upgrade 2>/dev/null; then
     # Try with --break-system-packages for newer pip
-    if ! pip3 install --break-system-packages tidalapi requests urllib3 PyOpenGL pystray pillow qrcode python-dateutil typing-extensions isodate mpegdash pyaes ratelimit six setproctitle -t "$INSTALL_DIR/libs" --no-cache-dir --upgrade 2>/dev/null; then
+    if ! pip3 install --break-system-packages requests urllib3 PyOpenGL pystray pillow qrcode python-dateutil typing-extensions isodate mpegdash pyaes ratelimit six setproctitle -t "$INSTALL_DIR/libs" --no-cache-dir --upgrade 2>/dev/null; then
         echo "⚠️ Online dependency install failed, using local site-packages fallback..."
         python3 - "$INSTALL_DIR/libs" <<'PY'
 import os
@@ -390,7 +390,7 @@ from importlib.util import find_spec
 
 target = sys.argv[1]
 modules = [
-    "tidalapi", "requests", "urllib3", "OpenGL", "qrcode", "PIL",
+    "requests", "urllib3", "OpenGL", "qrcode", "PIL",
     "certifi", "idna", "charset_normalizer", "dateutil",
     "typing_extensions", "isodate", "mpegdash", "pyaes", "ratelimit", "six",
 ]

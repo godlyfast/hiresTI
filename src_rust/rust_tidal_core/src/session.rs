@@ -300,6 +300,26 @@ impl Session {
         favorites::count_favorite_tracks(self)
     }
 
+    // ----- Playlist / folder CRUD (Phase 8) -----
+    pub fn create_playlist(
+        &self,
+        title: &str,
+        description: &str,
+        parent_folder_id: &str,
+    ) -> RtcResult<crate::models::Playlist> {
+        favorites::create_playlist(self, title, description, parent_folder_id)
+    }
+    pub fn create_folder(
+        &self,
+        title: &str,
+        parent_folder_id: &str,
+    ) -> RtcResult<Folder> {
+        favorites::create_folder(self, title, parent_folder_id)
+    }
+    pub fn remove_folders_playlists(&self, kind: &str, ids: &[String]) -> RtcResult<bool> {
+        favorites::remove_folders_playlists(self, kind, ids)
+    }
+
     // ----- Album / playlist / mix item listings (Phase 4) -----
     pub fn album_tracks(&self, album_id: i64, args: &ListArgs) -> RtcResult<PageResponse<Track>> {
         lists::album_tracks(self, album_id, args)

@@ -162,6 +162,11 @@ class _RustTidalCore:
                 ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int,
             ]
 
+            lib.rtc_session_collection_mutate.restype = ctypes.c_void_p
+            lib.rtc_session_collection_mutate.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p,
+            ]
+
             lib.rtc_session_list.restype = ctypes.c_void_p
             lib.rtc_session_list.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 
@@ -424,6 +429,39 @@ class RustTidalSession:
             lib.rtc_session_favorites_mix_toggle(
                 self._handle, str(mix_id).encode("utf-8"), 1 if add else 0
             )
+        )
+        return bool(out.get("ok")) if isinstance(out, dict) else False
+
+    # ----- Playlist / folder CRUD (Phase 8) -----
+    def create_playlist(
+        self, title: str, description: str = "", parent_folder_id: str = "root"
+    ) -> dict:
+        return self._call_session_with_json(
+            "rtc_session_collection_mutate",
+            {
+                "op": "create_playlist",
+                "title": str(title or ""),
+                "description": str(description or ""),
+                "parent_folder_id": str(parent_folder_id or "root"),
+            },
+        )
+
+    def create_folder(self, title: str, parent_folder_id: str = "root") -> dict:
+        return self._call_session_with_json(
+            "rtc_session_collection_mutate",
+            {
+                "op": "create_folder",
+                "title": str(title or ""),
+                "parent_folder_id": str(parent_folder_id or "root"),
+            },
+        )
+
+    def remove_folders_playlists(self, kind: str, ids) -> bool:
+        if isinstance(ids, str):
+            ids = [ids]
+        out = self._call_session_with_json(
+            "rtc_session_collection_mutate",
+            {"op": "remove", "kind": str(kind), "ids": [str(i) for i in ids if i]},
         )
         return bool(out.get("ok")) if isinstance(out, dict) else False
 

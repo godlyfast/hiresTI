@@ -32,7 +32,6 @@ depends=(
   'python-ratelimit'
   'python-requests'
   'python-six'
-  'python-tidalapi'
   'python-typing_extensions'
   'python-setproctitle'
   'libusb'

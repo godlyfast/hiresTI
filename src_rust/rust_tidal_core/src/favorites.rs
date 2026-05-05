@@ -416,3 +416,105 @@ pub fn count_favorite_tracks(session: &Session) -> RtcResult<i32> {
     )
     .map(|p| p.total_number_of_items.max(0))
 }
+
+// ---------------------------------------------------------------------------
+// Playlist / folder CRUD (v2 my-collection endpoints)
+// ---------------------------------------------------------------------------
+
+pub fn create_playlist(
+    session: &Session,
+    title: &str,
+    description: &str,
+    parent_folder_id: &str,
+) -> RtcResult<Playlist> {
+    let mut params = BTreeMap::new();
+    params.insert("name".into(), ParamValue::Str(title.into()));
+    params.insert("description".into(), ParamValue::Str(description.into()));
+    params.insert("folderId".into(), ParamValue::Str(parent_folder_id.into()));
+    let req = RequestArgs {
+        method: "PUT".into(),
+        path: "my-collection/playlists/folders/create-playlist".into(),
+        base_url: Some(V2_BASE.into()),
+        params: Some(params),
+        headers: None,
+        json_body: None,
+        form_body: false,
+    };
+    let resp = session.request(req)?;
+    let body = ok_or_status(resp)?;
+    let data = body
+        .get("data")
+        .ok_or_else(|| RtcError::Other("create_playlist: response missing 'data'".into()))?;
+    Ok(parse_playlist(data))
+}
+
+pub fn create_folder(
+    session: &Session,
+    title: &str,
+    parent_folder_id: &str,
+) -> RtcResult<Folder> {
+    let mut params = BTreeMap::new();
+    params.insert("name".into(), ParamValue::Str(title.into()));
+    params.insert("folderId".into(), ParamValue::Str(parent_folder_id.into()));
+    let req = RequestArgs {
+        method: "PUT".into(),
+        path: "my-collection/playlists/folders/create-folder".into(),
+        base_url: Some(V2_BASE.into()),
+        params: Some(params),
+        headers: None,
+        json_body: None,
+        form_body: false,
+    };
+    let resp = session.request(req)?;
+    let body = ok_or_status(resp)?;
+    let data = body
+        .get("data")
+        .ok_or_else(|| RtcError::Other("create_folder: response missing 'data'".into()))?;
+    Ok(crate::models::parse_folder(data))
+}
+
+/// Remove playlists or folders by trn. `kind` must be "playlist" or "folder";
+/// `ids` is a list of bare ids (without the trn: prefix) or full trns. The
+/// caller-supplied prefix is preserved when the id already begins with "trn:".
+pub fn remove_folders_playlists(
+    session: &Session,
+    kind: &str,
+    ids: &[String],
+) -> RtcResult<bool> {
+    let kind_norm = match kind.to_ascii_lowercase().as_str() {
+        "playlist" => "playlist",
+        "folder" => "folder",
+        other => return Err(RtcError::InvalidInput(format!(
+            "remove_folders_playlists: unknown kind {:?}",
+            other
+        ))),
+    };
+    let trns: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            if id.contains("trn:") {
+                id.clone()
+            } else {
+                format!("trn:{}:{}", kind_norm, id)
+            }
+        })
+        .collect();
+    if trns.is_empty() {
+        return Err(RtcError::InvalidInput(
+            "remove_folders_playlists: empty id list".into(),
+        ));
+    }
+    let mut params = BTreeMap::new();
+    params.insert("trns".into(), ParamValue::Str(trns.join(",")));
+    let req = RequestArgs {
+        method: "PUT".into(),
+        path: "my-collection/playlists/folders/remove".into(),
+        base_url: Some(V2_BASE.into()),
+        params: Some(params),
+        headers: None,
+        json_body: None,
+        form_body: false,
+    };
+    let resp = session.request(req)?;
+    Ok(resp.ok)
+}

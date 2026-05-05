@@ -1,4 +1,3 @@
-import tidalapi
 import concurrent.futures
 import logging
 import os
@@ -106,20 +105,16 @@ class _RustSearchResults:
 class TidalBackend:
     def __init__(self):
         self._normalize_tls_ca_env()
-        self.session = tidalapi.Session()
-        self._tune_http_pool()
         config_dir = get_config_dir()
         os.makedirs(config_dir, exist_ok=True)
         self.token_file = os.path.join(config_dir, "hiresti_token.json")
         self.legacy_token_file = os.path.join(config_dir, "hiresti_token.pkl")
         self._migrate_token_from_cache()
-        self.user = None
+        # `self.user` is a logged-in sentinel (True / False); it used to be
+        # a tidalapi.User object before Phase 8 ported playlist/folder CRUD
+        # and user.mixes() over to the Rust core.
+        self.user = False
         self.quality = self._get_best_quality()
-        # Rust auth core is authoritative starting Phase 1: it owns the
-        # PKCE / OAuth flows and the on-disk token file. The tidalapi
-        # `self.session` is mirrored from the Rust state on every auth
-        # event so Phase 2-6 surfaces that still call tidalapi keep
-        # working — Phase 7 deletes the mirror and tidalapi entirely.
         self._rust_core = get_rust_tidal_core()
         self._rust_session = None
         self._pending_oauth_thread = None
@@ -247,45 +242,6 @@ class TidalBackend:
         msg = str(exc or "").strip() or "(no message)"
         return f"[{kind}/{etype}] {msg}"
 
-    def _tune_http_pool(self, session_obj=None):
-        """
-        Raise requests/urllib3 pool size for high-volume library fetches.
-        This avoids noisy 'Connection pool is full, discarding connection' warnings
-        when many background tasks hit api.tidal.com in parallel.
-        """
-        try:
-            # Also initialize global session for helpers.py requests
-            get_global_session()
-        except Exception as e:
-            logger.debug("Failed initializing global session: %s", e)
-
-        try:
-            # Get session from different possible locations (tidalapi may create it lazily)
-            target_session = self.session if session_obj is None else session_obj
-            req_obj = getattr(target_session, "request", None)
-            if req_obj is None:
-                logger.debug("HTTP pool tuning skipped: no request object yet")
-                return
-            # tidalapi.Session.request_session is the underlying requests.Session
-            sess = getattr(target_session, "request_session", None)
-            if sess is None:
-                # Fallback: older tidalapi may embed it under request.session
-                sess = getattr(req_obj, "session", None)
-            if sess is None:
-                logger.debug("HTTP pool tuning skipped: no session in request object yet")
-                return
-            pool_size = int(os.getenv("HIRESTI_HTTP_POOL_SIZE", "64") or 64)
-            pool_size = max(10, min(256, pool_size))
-            adapter = requests.adapters.HTTPAdapter(
-                pool_connections=pool_size,
-                pool_maxsize=pool_size,
-            )
-            sess.mount("https://", adapter)
-            sess.mount("http://", adapter)
-            logger.info("HTTP pool tuned for tidalapi session: size=%s", pool_size)
-        except Exception as e:
-            logger.debug("Failed tuning tidalapi HTTP pool: %s", e)
-
     # TIDAL audioQuality canonical strings (what the playback endpoint expects).
     _QUALITY_ALIASES = {
         # tidalapi Quality enum lower-case attribute names.
@@ -363,7 +319,6 @@ class TidalBackend:
     def start_oauth(self):
         self._normalize_tls_ca_env()
         self._set_last_login_error("")
-        self.session = tidalapi.Session()
 
         if self._rust_session is None:
             raise RuntimeError(
@@ -463,7 +418,6 @@ class TidalBackend:
         # unlocks LOSSLESS at the legacy `playbackinfopostpaywall` endpoint.
         self._normalize_tls_ca_env()
         self._set_last_login_error("")
-        self.session = tidalapi.Session()
         if self._rust_session is None:
             raise RuntimeError(
                 "rust_tidal_core is unavailable — build src_rust/rust_tidal_core (cargo build --release)."
@@ -496,21 +450,14 @@ class TidalBackend:
 
     def _post_login_finalize(self, reason):
         """After the Rust session has acquired a token (PKCE or device-code),
-        mirror state into tidalapi.Session, run the unified post-login wiring,
-        and persist. Returns True on success."""
-        if self._rust_session is None:
+        run the unified post-login wiring and persist. Returns True on success."""
+        if self._rust_session is None or not self._rust_session.check_login():
             return False
-        if not self._rust_session.check_login():
-            return False
-        persisted = self._rust_session.persisted_snapshot()
-        if not persisted:
-            return False
-        tidalapi_session = self._mirror_to_tidalapi_session(persisted)
-        if tidalapi_session is None:
-            return False
-        self.session = tidalapi_session
-        self.user = tidalapi_session.user
-        self._tune_http_pool()
+        self.user = True
+        try:
+            get_global_session()
+        except Exception as e:
+            logger.debug("Failed initializing global HTTP session: %s", e)
         self.save_session()
         self.refresh_favorite_ids()
         self._set_last_login_error("")
@@ -624,14 +571,6 @@ class TidalBackend:
             return None
         return self._rust_session.page_get(path, params=params)
 
-    def _deserialize_expiry(self, value):
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                return value
-        return value
-
     def _migrate_token_from_cache(self):
         """Move token files from the old cache location to the config dir (one-time migration)."""
         try:
@@ -687,46 +626,23 @@ class TidalBackend:
             return None
         return data
 
-    def _mirror_to_tidalapi_session(self, persisted):
-        """Bridge Rust auth state into tidalapi.Session so endpoint surfaces
-        not yet migrated keep working. Triggers tidalapi's own /v1/sessions
-        call; that's intentional — Rust already validated the token, we want
-        tidalapi's User factory cache populated for downstream consumers."""
-        new_session = tidalapi.Session()
-        ok = new_session.load_oauth_session(
-            persisted.get('token_type'),
-            persisted.get('access_token'),
-            persisted.get('refresh_token'),
-            self._deserialize_expiry(persisted.get('expiry_time')),
-            is_pkce=bool(persisted.get('is_pkce', False)),
-        )
-        if not ok:
-            return None
-        return new_session
-
     def _restore_session_from_saved_data(self, data, reason="restore"):
         try:
-            if self._rust_session is not None:
-                # Rust core: load token, fetch user info via /v1/sessions, run
-                # check_login. Authoritative path.
-                self._rust_session.load_token(data)
-                if not self._rust_session.check_login():
-                    logger.warning("Session %s failed: rust check_login returned false.", reason)
-                    return False
-                tidalapi_session = self._mirror_to_tidalapi_session(data)
-                if tidalapi_session is None:
-                    logger.warning("Session %s: tidalapi mirror failed.", reason)
-                    return False
-            else:
-                # Fallback path used only when the .so failed to load.
-                tidalapi_session = self._mirror_to_tidalapi_session(data)
-                if tidalapi_session is None or not tidalapi_session.check_login():
-                    logger.warning("Session %s failed: tidalapi check_login false.", reason)
-                    return False
-
-            self.session = tidalapi_session
-            self.user = tidalapi_session.user
-            self._tune_http_pool()
+            if self._rust_session is None:
+                logger.warning(
+                    "Session %s failed: rust core unavailable; "
+                    "build src_rust/rust_tidal_core/ first.", reason,
+                )
+                return False
+            self._rust_session.load_token(data)
+            if not self._rust_session.check_login():
+                logger.warning("Session %s failed: rust check_login returned false.", reason)
+                return False
+            self.user = True
+            try:
+                get_global_session()
+            except Exception as e:
+                logger.debug("Failed initializing global HTTP session: %s", e)
             self._set_last_login_error("")
             try:
                 self.save_session()
@@ -991,26 +907,14 @@ class TidalBackend:
         return ("DATE", "ASC" if sort_key.endswith("_asc") else "DESC")
 
     def get_favorite_artists_count(self):
-        try:
-            if self._rust_session is not None:
-                def _fetch():
-                    return self._rust_session.count("artists")
-                return max(0, int(self._call_with_session_recovery(_fetch, context="favorite artists count") or 0))
-        except RustTidalCoreError as e:
-            logger.debug("rust artists count error [%s]: %s", e.kind, e)
+        if self._rust_session is None:
+            return 0
         try:
             def _fetch():
-                if not self.user:
-                    return 0
-                fav = getattr(self.user, "favorites", None)
-                count_api = getattr(fav, "get_artists_count", None)
-                if callable(count_api):
-                    return max(0, int(count_api() or 0))
-                return 0
-
+                return self._rust_session.count("artists")
             return max(0, int(self._call_with_session_recovery(_fetch, context="favorite artists count") or 0))
-        except Exception as e:
-            logger.warning("Failed to fetch favorite artists count: %s", e)
+        except RustTidalCoreError as e:
+            logger.debug("rust artists count error [%s]: %s", e.kind, e)
             return 0
 
     def get_favorite_artists_page(self, limit=50, offset=0, sort="name_asc"):
@@ -1081,35 +985,37 @@ class TidalBackend:
             return []
 
     def get_favorite_mixes(self, limit=200, offset=0):
-        # tidalapi 0.8.11 has no `*_paginated` helper for mixes — the v2
-        # endpoint accepts (limit, offset) directly and returns a flat
-        # List[MixV2].  Most users have well under 200 favorited mixes,
-        # so a single page is enough; we still loop in case Tidal returns
-        # short pages.
+        # v2 favorites/mixes endpoint accepts (limit, offset) directly and
+        # returns a flat list.  Most users have well under 200 favorited
+        # mixes, so a single page is enough; we still loop in case Tidal
+        # returns short pages.
+        if self._rust_session is None:
+            return []
         try:
             def _fetch():
-                if not self.user:
-                    return []
-                fav = getattr(self.user, "favorites", None)
-                if not fav or not hasattr(fav, "mixes"):
-                    return []
                 seen = set()
                 out = []
                 page_size = min(int(limit), 50)
                 local_offset = int(offset)
                 while len(out) < int(limit):
-                    page = fav.mixes(limit=page_size, offset=local_offset) or []
-                    if not isinstance(page, list):
-                        page = list(page)
-                    if not page:
+                    raw = self._rust_session.list(
+                        "favorite_mixes",
+                        limit=page_size,
+                        offset=local_offset,
+                    )
+                    items = (raw or {}).get("items") or []
+                    if not items:
                         break
-                    for mix in page:
+                    for it in items:
+                        if not isinstance(it, dict):
+                            continue
+                        mix = wrap_model("mix", it, rust_session=self._rust_session)
                         mix_id = str(getattr(mix, "id", "") or "")
                         if not mix_id or mix_id in seen:
                             continue
                         seen.add(mix_id)
                         out.append(mix)
-                    if len(page) < page_size:
+                    if len(items) < page_size:
                         break
                     local_offset += page_size
                 return out
@@ -1174,59 +1080,28 @@ class TidalBackend:
             return []
 
     def get_user_playlists(self, limit=80):
-        if not self.user:
+        if not self.user or self._rust_session is None:
+            return []
+        try:
+            from _rust.tidal import _drain_pages
+            items = _drain_pages(
+                self._rust_session,
+                "user_playlists",
+                page_size=50,
+                folder_id="root",
+            )
+        except RustTidalCoreError as e:
+            logger.debug("rust user_playlists error [%s]: %s", e.kind, e)
             return []
         merged = []
         seen = set()
-
-        def _push(items):
-            if items is None:
-                return
-            seq = items() if callable(items) else items
-            for p in (seq or []):
-                pid = str(getattr(p, "id", "") or "")
-                if not pid or pid in seen:
-                    continue
-                seen.add(pid)
-                merged.append(p)
-
-        # Phase 4 fast path: Rust v2 my-collection endpoint with pagination.
-        if self._rust_session is not None:
-            try:
-                from _rust.tidal import _drain_pages
-                items = _drain_pages(
-                    self._rust_session,
-                    "user_playlists",
-                    page_size=50,
-                    folder_id="root",
-                )
-                for p in (items or []):
-                    pid = str(p.get("id") or "")
-                    if not pid or pid in seen:
-                        continue
-                    seen.add(pid)
-                    merged.append(
-                        wrap_model("playlist", p, rust_session=self._rust_session)
-                    )
-                if merged:
-                    return merged[: max(0, int(limit or 0)) or None]
-            except RustTidalCoreError as e:
-                logger.debug("rust user_playlists error [%s]: %s", e.kind, e)
-
-        try:
-            if hasattr(self.user, "playlists"):
-                _push(self.user.playlists())
-        except Exception as e:
-            logger.debug("Failed to fetch user playlists: %s", e)
-
-        try:
-            fav = getattr(self.user, "favorites", None)
-            if fav is not None and hasattr(fav, "playlists"):
-                _push(fav.playlists())
-        except Exception as e:
-            logger.debug("Failed to fetch favorite playlists: %s", e)
-
-        return merged[: max(0, int(limit))]
+        for p in (items or []):
+            pid = str(p.get("id") or "")
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            merged.append(wrap_model("playlist", p, rust_session=self._rust_session))
+        return merged[: max(0, int(limit or 0)) or None]
 
     def _resolve_user_playlist(self, playlist_or_id):
         if playlist_or_id is None:
@@ -1243,118 +1118,96 @@ class TidalBackend:
             return None
 
     def create_cloud_playlist(self, name, description=""):
-        if not self.user:
-            logger.warning("Cannot create cloud playlist while not logged in.")
-            return None
-        title = str(name or "").strip() or "New Playlist"
-        desc = str(description or "")
-        try:
-            pl = self.user.create_playlist(title, desc, parent_id="root")
-            logger.info("Cloud playlist created: id=%s name=%r", getattr(pl, "id", None), title)
-            return pl
-        except Exception as e:
-            logger.warning("Failed to create cloud playlist %r: %s", title, e)
-            return None
+        return self.create_cloud_playlist_in_folder(name, description, parent_folder_id="root")
 
     def create_cloud_playlist_in_folder(self, name, description="", parent_folder_id="root"):
-        if not self.user:
-            logger.warning("Cannot create cloud playlist while not logged in.")
+        if self._rust_session is None:
+            logger.warning("Cannot create cloud playlist: rust core unavailable.")
             return None
         title = str(name or "").strip() or "New Playlist"
         desc = str(description or "")
         parent_id = str(parent_folder_id or "root")
         try:
-            pl = self.user.create_playlist(title, desc, parent_id=parent_id)
-            logger.info(
-                "Cloud playlist created: id=%s name=%r folder=%s",
-                getattr(pl, "id", None),
-                title,
-                parent_id,
-            )
-            return pl
-        except Exception as e:
-            logger.warning("Failed to create cloud playlist %r in folder %s: %s", title, parent_id, e)
+            data = self._rust_session.create_playlist(title, desc, parent_id)
+        except RustTidalCoreError as e:
+            logger.warning("Failed to create cloud playlist %r in folder %s: [%s] %s",
+                           title, parent_id, e.kind, e)
             return None
+        pl = wrap_model("playlist", data, rust_session=self._rust_session)
+        logger.info(
+            "Cloud playlist created: id=%s name=%r folder=%s",
+            getattr(pl, "id", None), title, parent_id,
+        )
+        return pl
 
     def create_cloud_folder(self, name, parent_folder_id="root"):
-        if not self.user:
-            logger.warning("Cannot create cloud folder while not logged in.")
+        if self._rust_session is None:
+            logger.warning("Cannot create cloud folder: rust core unavailable.")
             return None
         title = str(name or "").strip() or "New Folder"
         parent_id = str(parent_folder_id or "root")
         try:
-            folder = self.user.create_folder(title, parent_id=parent_id)
-            logger.info(
-                "Cloud folder created: id=%s name=%r parent=%s",
-                getattr(folder, "id", None),
-                title,
-                parent_id,
-            )
-            return folder
-        except Exception as e:
-            logger.warning("Failed to create cloud folder %r in parent %s: %s", title, parent_id, e)
+            data = self._rust_session.create_folder(title, parent_id)
+        except RustTidalCoreError as e:
+            logger.warning("Failed to create cloud folder %r in parent %s: [%s] %s",
+                           title, parent_id, e.kind, e)
             return None
+        folder = wrap_model("folder", data, rust_session=self._rust_session)
+        logger.info(
+            "Cloud folder created: id=%s name=%r parent=%s",
+            getattr(folder, "id", None), title, parent_id,
+        )
+        return folder
 
-    def _resolve_user_folder(self, folder_or_id):
+    def _folder_id_str(self, folder_or_id):
         if folder_or_id is None:
-            return None
-        if hasattr(folder_or_id, "rename") and hasattr(folder_or_id, "remove"):
-            return folder_or_id
-        fid = str(getattr(folder_or_id, "id", folder_or_id) or "").strip()
-        if not fid:
-            return None
-        try:
-            for item in self.get_all_playlist_folders(limit=5000, max_depth=12):
-                if str(item.get("id", "")) == fid:
-                    obj = item.get("obj")
-                    if obj is not None:
-                        return obj
-        except Exception as e:
-            logger.debug("Folder resolve scan failed for %s: %s", fid, e)
-        return None
+            return ""
+        return str(getattr(folder_or_id, "id", folder_or_id) or "").strip()
 
     def rename_cloud_folder(self, folder_or_id, name):
-        folder = self._resolve_user_folder(folder_or_id)
+        # TIDAL has no folder-rename endpoint exposed in the v2 collection
+        # surface; tidalapi proxied this via Folder.rename which itself just
+        # called the same /playlists/folders/* endpoints. We don't yet have a
+        # Rust path that issues the rename, so report not-supported until the
+        # endpoint is added in a follow-up slice.
+        fid = self._folder_id_str(folder_or_id)
         new_name = str(name or "").strip()
-        if folder is None or not new_name:
-            return {"ok": False, "folder_id": getattr(folder, "id", None) if folder is not None else None}
-        try:
-            ok = bool(folder.rename(new_name))
-            if ok:
-                try:
-                    folder.name = new_name
-                except Exception:
-                    pass
-            return {"ok": ok, "folder_id": getattr(folder, "id", None), "name": new_name}
-        except Exception as e:
-            logger.warning("Failed renaming folder %s: %s", getattr(folder, "id", None), e)
-            return {"ok": False, "folder_id": getattr(folder, "id", None), "name": new_name}
+        logger.warning(
+            "rename_cloud_folder is not implemented in the Rust core yet (folder=%s name=%r)",
+            fid, new_name,
+        )
+        return {"ok": False, "folder_id": fid or None, "name": new_name}
 
     def delete_cloud_folder(self, folder_or_id):
-        folder = self._resolve_user_folder(folder_or_id)
-        if folder is None:
-            return {"ok": False, "folder_id": None}
+        fid = self._folder_id_str(folder_or_id)
+        if not fid or self._rust_session is None:
+            return {"ok": False, "folder_id": fid or None}
         try:
-            ok = bool(folder.remove())
-            return {"ok": ok, "folder_id": getattr(folder, "id", None)}
-        except Exception as e:
-            logger.warning("Failed deleting folder %s: %s", getattr(folder, "id", None), e)
-            return {"ok": False, "folder_id": getattr(folder, "id", None)}
+            ok = self._rust_session.remove_folders_playlists("folder", [fid])
+        except RustTidalCoreError as e:
+            logger.warning("Failed deleting folder %s: [%s] %s", fid, e.kind, e)
+            return {"ok": False, "folder_id": fid}
+        return {"ok": bool(ok), "folder_id": fid}
 
     def _fetch_playlist_folders_page(self, parent_folder_id="root", limit=50, offset=0):
-        if not self.user or not hasattr(self.user, "favorites"):
+        if self._rust_session is None:
             return []
-        fav = self.user.favorites
-        if not hasattr(fav, "playlist_folders"):
-            return []
-        return list(
-            fav.playlist_folders(
+        try:
+            page = self._rust_session.list(
+                "playlist_folders",
                 limit=int(limit),
                 offset=int(offset),
-                parent_folder_id=str(parent_folder_id or "root"),
+                folder_id=str(parent_folder_id or "root"),
             )
-            or []
-        )
+        except RustTidalCoreError as e:
+            logger.debug("rust playlist_folders error [%s]: %s", e.kind, e)
+            return []
+        items = (page or {}).get("items") or []
+        return [
+            wrap_model("folder", it, rust_session=self._rust_session)
+            for it in items
+            if isinstance(it, dict)
+        ]
 
     def get_playlist_folders(self, parent_folder_id="root", limit=1000):
         out = []
@@ -1404,20 +1257,27 @@ class TidalBackend:
 
         # Root folder.
         if parent_folder is None or str(parent_folder) == "root":
-            if not self.user or not hasattr(self.user, "favorites"):
-                return []
-            fav = self.user.favorites
-            if not hasattr(fav, "playlists"):
+            if self._rust_session is None:
                 return []
             offset = 0
             while len(out) < max_items:
                 try:
-                    page = list(fav.playlists(limit=page_size, offset=offset) or [])
-                except Exception as e:
-                    logger.warning("Failed fetching root playlists: %s", e)
+                    raw_page = self._rust_session.list(
+                        "user_playlists",
+                        limit=page_size,
+                        offset=offset,
+                        folder_id="root",
+                    )
+                except RustTidalCoreError as e:
+                    logger.warning("Failed fetching root playlists [%s]: %s", e.kind, e)
                     break
-                if not page:
+                items = (raw_page or {}).get("items") or []
+                if not items:
                     break
+                page = [
+                    wrap_model("playlist", it, rust_session=self._rust_session)
+                    for it in items if isinstance(it, dict)
+                ]
                 new_in_page = _ingest(page)
                 if new_in_page == 0:
                     logger.warning(
@@ -1426,9 +1286,9 @@ class TidalBackend:
                         len(page),
                     )
                     break
-                if len(page) < page_size:
+                if len(items) < page_size:
                     break
-                offset += len(page)
+                offset += len(items)
             return out[:max_items]
 
         folder = parent_folder
@@ -2189,7 +2049,7 @@ class TidalBackend:
                 base_url="https://api.tidal.com/v2/",
                 params={
                     "deviceType": "BROWSER",
-                    "locale": getattr(self.session, "locale", None),
+                    "locale": "en_US",
                     "platform": "WEB",
                 },
             )
@@ -2696,7 +2556,7 @@ class TidalBackend:
                 logger.debug("Decades: failed to fetch %s (%s): %s", label, path, e)
             return None
 
-        if self._rust_session is None and (self.session is None or getattr(self.session, "page", None) is None):
+        if self._rust_session is None:
             return [], []
 
         # Return the decade definitions and only the first decade's content eagerly.
@@ -3249,13 +3109,19 @@ class TidalBackend:
             return None
 
     def _get_fallback_mixes(self):
-        try:
-            if hasattr(self.user, 'mixes'):
-                raw = self.user.mixes()
-                return [self._process_generic_item(m) for m in (raw() if callable(raw) else raw)]
-        except Exception as e:
-            logger.warning("Failed to fetch fallback mixes: %s", e)
+        if self._rust_session is None:
             return []
+        try:
+            page = self._rust_session.list("favorite_mixes", limit=50, offset=0)
+        except RustTidalCoreError as e:
+            logger.warning("Failed to fetch fallback mixes [%s]: %s", e.kind, e)
+            return []
+        items = (page or {}).get("items") or []
+        wrapped = [
+            wrap_model("mix", it, rust_session=self._rust_session)
+            for it in items if isinstance(it, dict)
+        ]
+        return [self._process_generic_item(m) for m in wrapped]
 
     def get_tracks(self, item):
         try:
@@ -4055,8 +3921,7 @@ class TidalBackend:
                     os.remove(token_path)
                 except Exception as e:
                     logger.warning("Failed to remove token file %s: %s", token_path, e)
-        self.user = None
-        self.session = tidalapi.Session()
+        self.user = False
         # Drop the Rust session and create a fresh one so any cached
         # token state and pending PKCE/device challenges are gone.
         if self._rust_session is not None:

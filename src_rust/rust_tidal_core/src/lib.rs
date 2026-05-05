@@ -461,6 +461,69 @@ pub unsafe extern "C" fn rtc_session_favorites_mix_toggle(
     handle(result)
 }
 
+/// Playlist / folder mutation dispatcher. `args_json`:
+///   {"op": "create_playlist", "title": "...", "description": "...",
+///    "parent_folder_id": "root"}
+///   {"op": "create_folder", "title": "...", "parent_folder_id": "root"}
+///   {"op": "remove", "kind": "playlist|folder", "ids": ["uuid", ...]}
+/// Returns the parsed model dict for create ops, `{"ok": true|false}` for remove.
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_collection_mutate(
+    handle_ptr: *mut Session,
+    args_json: *const c_char,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case")]
+    enum Op {
+        CreatePlaylist {
+            title: String,
+            #[serde(default)]
+            description: String,
+            #[serde(default = "default_root")]
+            parent_folder_id: String,
+        },
+        CreateFolder {
+            title: String,
+            #[serde(default = "default_root")]
+            parent_folder_id: String,
+        },
+        Remove {
+            kind: String,
+            ids: Vec<String>,
+        },
+    }
+    fn default_root() -> String {
+        "root".into()
+    }
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let args: Op = parse_json_input(args_json, "args_json")?;
+        match args {
+            Op::CreatePlaylist {
+                title,
+                description,
+                parent_folder_id,
+            } => {
+                let pl = session.create_playlist(&title, &description, &parent_folder_id)?;
+                Ok(serde_json::to_value(pl)?)
+            }
+            Op::CreateFolder {
+                title,
+                parent_folder_id,
+            } => {
+                let f = session.create_folder(&title, &parent_folder_id)?;
+                Ok(serde_json::to_value(f)?)
+            }
+            Op::Remove { kind, ids } => {
+                Ok(serde_json::json!({
+                    "ok": session.remove_folders_playlists(&kind, &ids)?
+                }))
+            }
+        }
+    })();
+    handle(result)
+}
+
 /// Listing endpoint dispatcher. `args_json` schema:
 /// `{"kind": "albums|artists|tracks|mixes|playlists|playlist_folders|
 ///           album_tracks|playlist_items|playlist_tracks|mix_items",
