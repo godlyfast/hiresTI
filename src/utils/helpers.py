@@ -175,7 +175,10 @@ def download_to_cache(url: str, cache_dir: str, filename: str = None, headers: d
             _write_atomic_bytes(f_path, data)
             return f_path
         except (requests.RequestException, ValueError, OSError) as e:
-            logger.debug("download_to_cache failed (url=%s): %s", url, e)
+            logger.warning(
+                "download_to_cache failed (url=%s) [%s]: %s",
+                url, type(e).__name__, e,
+            )
             return None
 
 

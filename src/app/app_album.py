@@ -101,9 +101,38 @@ def _update_album_sort_headers(self):
                 btn.set_label(text)
 
 
-def load_album_tracks(self, tracks):
+def load_album_tracks(self, tracks, unavailable=False):
     self.album_track_source = list(tracks or [])
     self._render_album_tracks()
+    if unavailable and not self.album_track_source:
+        # Render an explicit placeholder when TIDAL has returned 404 for
+        # the album. Without this the user sees a half-rendered detail
+        # page (header populated from the cached card, body empty) which
+        # is indistinguishable from a slow load.
+        from gi.repository import Gtk
+        while c := self.track_list.get_first_child():
+            self.track_list.remove(c)
+        row = Gtk.ListBoxRow(activatable=False, selectable=False, css_classes=["album-unavailable-row"])
+        lbl = Gtk.Label(
+            label="This album is no longer available on TIDAL.",
+            xalign=0.5,
+            margin_top=24,
+            margin_bottom=24,
+            margin_start=16,
+            margin_end=16,
+            css_classes=["dim-label"],
+        )
+        row.set_child(lbl)
+        self.track_list.append(row)
+        for btn_attr in ("_album_play_btn", "_album_shuffle_btn"):
+            btn = getattr(self, btn_attr, None)
+            if btn is not None:
+                btn.set_sensitive(False)
+    else:
+        for btn_attr in ("_album_play_btn", "_album_shuffle_btn"):
+            btn = getattr(self, btn_attr, None)
+            if btn is not None:
+                btn.set_sensitive(True)
 
 
 def _render_album_tracks(self):

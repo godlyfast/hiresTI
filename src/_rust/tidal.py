@@ -623,6 +623,13 @@ class _NestedRef:
         return dict(self._data)
 
 
+def _snake_to_camel(name: str) -> Optional[str]:
+    if "_" not in name or name.startswith("_"):
+        return None
+    head, *tail = name.split("_")
+    return head + "".join(p.capitalize() for p in tail) if tail else None
+
+
 class _RustModelBase:
     """Read-only view over a Rust model dict.
 
@@ -648,7 +655,11 @@ class _RustModelBase:
 
     def __getattr__(self, name: str) -> Any:
         data = self.__dict__.get("_data") or {}
-        for key in (name, self._FIELD_ALIASES.get(name)):
+        # snake_case → camelCase fallback so legacy probes like
+        # `square_image` / `image_id` resolve against TIDAL's camelCase
+        # JSON without each call site having to know both spellings.
+        camel = _snake_to_camel(name)
+        for key in (name, self._FIELD_ALIASES.get(name), camel):
             if key is not None and key in data:
                 v = data[key]
                 if isinstance(v, dict):
@@ -784,9 +795,17 @@ class RustArtist(_RustModelBase):
 
 
 class RustPlaylist(_RustModelBase):
+    # TIDAL playlist JSON uses `uuid`, not `id`. tidalapi normalized this
+    # by exposing playlist.id; mirror that so existing call sites keep
+    # working (`_rust_playlist(playlist.id)`, etc).
+    _FIELD_ALIASES = {"id": "uuid", "uuid": "id", "title": "name", "name": "title"}
+
+    def _playlist_id(self):
+        return self._data.get("id") or self._data.get("uuid")
+
     def tracks(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
-        pid = self._data.get("id")
+        pid = self._playlist_id()
         if rust_session is None or not pid:
             return []
         try:
@@ -809,7 +828,7 @@ class RustPlaylist(_RustModelBase):
 
     def items(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
-        pid = self._data.get("id")
+        pid = self._playlist_id()
         if rust_session is None or not pid:
             return []
         try:

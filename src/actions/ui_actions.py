@@ -1775,8 +1775,15 @@ def show_album_details(app, alb):
         count = len(ts) if ts else 0
         if count > 0:
             desc += f"  •  {count} Tracks"
+        unavailable = (
+            count == 0
+            and not is_mix
+            and app.backend.is_album_unavailable(getattr(alb, "id", None))
+        )
+        if unavailable:
+            desc = (desc.strip(" • ") + "  •  Unavailable").lstrip(" • ")
         GLib.idle_add(lambda: app.header_meta.set_text(desc.strip(" • ")))
-        GLib.idle_add(app.load_album_tracks, ts)
+        GLib.idle_add(app.load_album_tracks, ts, unavailable)
         _load_similar_albums(app, alb)
 
     Thread(target=detail_task, daemon=True).start()

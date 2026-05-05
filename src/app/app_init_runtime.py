@@ -20,8 +20,35 @@ from utils.paths import get_cache_dir, get_config_dir
 logger = logging.getLogger(__name__)
 
 
+_SECTION_CACHE_ATTRS = (
+    "_home_sections_cache",
+    "_top_sections_cache",
+    "_new_sections_cache",
+    "_hires_sections_cache",
+    "_genres_sections_cache",
+    "_decades_sections_cache",
+    "_moods_sections_cache",
+)
+
+
+def _invalidate_section_caches(app):
+    """Drop the page-section dicts the UI keeps so the next nav rebuilds
+    them from the backend (and thus picks up dead-album filtering)."""
+    for attr in _SECTION_CACHE_ATTRS:
+        if hasattr(app, attr):
+            setattr(app, attr, None)
+        ts_attr = f"{attr}_time"
+        if hasattr(app, ts_attr):
+            setattr(app, ts_attr, 0)
+
+
 def _init_paths_and_settings(self):
     self.backend = TidalBackend()
+    # When the backend discovers a stale album reference (404), drop any
+    # cached section dicts so the next render filters out ghost cards.
+    self.backend.set_section_cache_invalidator(
+        lambda: _invalidate_section_caches(self)
+    )
     self._cache_root = get_cache_dir()
     self._config_root = get_config_dir()
     os.makedirs(self._cache_root, exist_ok=True)

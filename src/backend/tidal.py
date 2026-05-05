@@ -102,6 +102,72 @@ class _RustSearchResults:
         return getattr(self, key)
 
 
+class _UserView:
+    """Logged-in-user view exposing the attributes the UI probes
+    (`first_name`, `name`, `username`, `id`, `profile_metadata`).
+
+    Truthy so legacy `if backend.user:` checks keep working. Built from
+    the JSON returned by `/v1/users/{uid}` plus the `UserInfo` we already
+    have from the Rust session, so a missing profile fetch still yields
+    a usable sentinel."""
+
+    __slots__ = ("_profile", "_meta", "_user_id")
+
+    def __init__(self, user_id, profile=None, meta=None):
+        self._user_id = int(user_id) if user_id is not None else None
+        self._profile = dict(profile or {})
+        self._meta = dict(meta or {})
+
+    def __bool__(self):
+        return self._user_id is not None
+
+    @property
+    def id(self):
+        return self._user_id
+
+    @property
+    def first_name(self):
+        return self._profile.get("firstName") or ""
+
+    @property
+    def last_name(self):
+        return self._profile.get("lastName") or ""
+
+    @property
+    def name(self):
+        # Prefer profile_metadata.name (display name set by the user in
+        # Tidal app) → first+last → username local-part.
+        meta_name = self._meta.get("name") if isinstance(self._meta, dict) else None
+        if meta_name:
+            return meta_name
+        first = self._profile.get("firstName") or ""
+        last = self._profile.get("lastName") or ""
+        full = f"{first} {last}".strip()
+        if full:
+            return full
+        username = self._profile.get("username") or ""
+        if username:
+            return username.split("@")[0]
+        return ""
+
+    @property
+    def firstname(self):
+        # Tidalapi exposed both `first_name` and `firstname`. UI probes both.
+        return self.first_name
+
+    @property
+    def username(self):
+        return self._profile.get("username") or self._profile.get("email") or ""
+
+    @property
+    def email(self):
+        return self._profile.get("email") or ""
+
+    @property
+    def profile_metadata(self):
+        return dict(self._meta) if self._meta else None
+
+
 class TidalBackend:
     def __init__(self):
         self._normalize_tls_ca_env()
@@ -453,7 +519,7 @@ class TidalBackend:
         run the unified post-login wiring and persist. Returns True on success."""
         if self._rust_session is None or not self._rust_session.check_login():
             return False
-        self.user = True
+        self.user = self._build_user_view()
         try:
             get_global_session()
         except Exception as e:
@@ -462,6 +528,39 @@ class TidalBackend:
         self.refresh_favorite_ids()
         self._set_last_login_error("")
         return True
+
+    def _build_user_view(self):
+        """Fetch the logged-in user's profile and wrap it as `_UserView`.
+
+        Returns a `_UserView` even if the profile fetch fails — the user_id
+        is enough to keep `if backend.user:` truthy. UI just falls back to
+        a generic display name in that case."""
+        rust = self._rust_session
+        if rust is None:
+            return _UserView(None)
+        try:
+            snap = rust.user_snapshot() or {}
+        except Exception as e:
+            logger.debug("user_snapshot failed: %s", e)
+            snap = {}
+        user_id = snap.get("user_id") or snap.get("userId")
+        if user_id is None:
+            return _UserView(None)
+        profile = {}
+        meta = {}
+        try:
+            r = rust.request("GET", f"users/{int(user_id)}")
+            if r and r.get("ok") and isinstance(r.get("body"), dict):
+                profile = r["body"]
+        except Exception as e:
+            logger.debug("Fetch user profile failed: %s", e)
+        try:
+            r = rust.request("GET", f"users/{int(user_id)}/profileMetadata")
+            if r and r.get("ok") and isinstance(r.get("body"), dict):
+                meta = r["body"]
+        except Exception as e:
+            logger.debug("Fetch user profile metadata failed: %s", e)
+        return _UserView(user_id, profile=profile, meta=meta)
 
     def check_login(self):
         if self._rust_session is None:
@@ -511,9 +610,42 @@ class TidalBackend:
             data = rust.fetch_album(aid)
         except RustTidalCoreError as e:
             if e.kind == "not_found":
+                # Newly-discovered dead album: drop any cached sections
+                # built before this discovery so the next render filters
+                # the ghost card out (see _is_dead_section_item).
+                fresh_dead = aid not in self._dead_album_ids
                 self._dead_album_ids.add(aid)
+                if fresh_dead:
+                    self._invalidate_section_caches_for_dead_item()
             raise
         return wrap_model("album", data, rust_session=rust)
+
+    def _invalidate_section_caches_for_dead_item(self):
+        """Tell the UI layer its cached home / Hi-Res / Top / Genres /
+        Decades / Moods sections are stale so the next render rebuilds
+        them without the album we just confirmed is gone."""
+        # `set_app_callback` lets the UI register a hook; the backend
+        # calls it instead of importing UI modules. If no hook is
+        # registered (CLI / tests), this is a no-op.
+        cb = getattr(self, "_section_cache_invalidator", None)
+        if callable(cb):
+            try:
+                cb()
+            except Exception as e:
+                logger.debug("Section-cache invalidator raised: %s", e)
+
+    def set_section_cache_invalidator(self, cb):
+        self._section_cache_invalidator = cb
+
+    def is_album_unavailable(self, album_id):
+        """True iff `album_id` 404'd on TIDAL during this session.
+        Stale album references (removed from the catalog) end up here, so
+        the album-detail view can render an explicit placeholder rather
+        than an empty track list."""
+        try:
+            return int(album_id) in self._dead_album_ids
+        except (TypeError, ValueError):
+            return False
 
     def _rust_artist(self, artist_or_id):
         if hasattr(artist_or_id, "id") and not isinstance(artist_or_id, (int, str)):
@@ -638,7 +770,7 @@ class TidalBackend:
             if not self._rust_session.check_login():
                 logger.warning("Session %s failed: rust check_login returned false.", reason)
                 return False
-            self.user = True
+            self.user = self._build_user_view()
             try:
                 get_global_session()
             except Exception as e:
@@ -2269,6 +2401,8 @@ class TidalBackend:
                         if link_norm and "explore_top" in link_norm and link_norm not in seen_paths:
                             queue.append(link_norm)
 
+                        if self._is_dead_section_item(item):
+                            continue
                         processed = _process_top_item(item)
                         if not processed:
                             processed = self._process_generic_item(item)
@@ -2437,6 +2571,8 @@ class TidalBackend:
                         if link_norm and "explore_new" in link_norm and link_norm not in seen_paths:
                             queue.append(link_norm)
 
+                        if self._is_dead_section_item(item):
+                            continue
                         processed = _process_item(item)
                         if not processed:
                             processed = self._process_generic_item(item)
@@ -2541,6 +2677,8 @@ class TidalBackend:
                     seen_cat_titles.add(cat_title.lower())
                     cat_items = []
                     for item in list(getattr(category, "items", None) or []):
+                        if self._is_dead_section_item(item):
+                            continue
                         processed = _process_item(item)
                         if not processed:
                             processed = self._process_generic_item(item)
@@ -2642,6 +2780,8 @@ class TidalBackend:
                 seen_cat_titles.add(cat_title.lower())
                 cat_items = []
                 for item in list(getattr(category, "items", None) or []):
+                    if self._is_dead_section_item(item):
+                        continue
                     processed = _process_item(item)
                     if not processed:
                         processed = self._process_generic_item(item)
@@ -2874,6 +3014,8 @@ class TidalBackend:
                 cat_items = []
                 raw_items, more_path = _collect_category_items(category)
                 for item in raw_items:
+                    if self._is_dead_section_item(item):
+                        continue
                     processed = _process_item(item)
                     if processed is _SKIP_ITEM:
                         continue
@@ -3067,6 +3209,8 @@ class TidalBackend:
                 raw_items = _collect_category_items(category)
                 sec_items = []
                 for item in raw_items:
+                    if self._is_dead_section_item(item):
+                        continue
                     processed = _process_item(item)
                     if not processed:
                         processed = self._process_generic_item(item)
@@ -3079,17 +3223,44 @@ class TidalBackend:
             logger.warning("Get hires page error [%s]: %s", classify_exception(e), e)
         return sections
 
+    def _is_dead_section_item(self, item):
+        """True if the wrapped item is an album/track we already know is
+        gone from TIDAL's catalog (i.e. cached as 404). Section builders
+        call this to skip ghost cards so the user doesn't click into a
+        page that can't load anything."""
+        if item is None:
+            return False
+        cls = type(item).__name__
+        try:
+            item_id = int(getattr(item, "id", None))
+        except (TypeError, ValueError):
+            return False
+        if "Album" in cls and item_id in self._dead_album_ids:
+            return True
+        if "Track" in cls and item_id in self._dead_track_ids:
+            return True
+        return False
+
     def _process_generic_item(self, item):
+        if self._is_dead_section_item(item):
+            return None
         try:
             # 基础信息
             _t = getattr(item, 'title', None)
             _name = str(_t) if _t is not None and not callable(_t) else str(getattr(item, 'name', None) or 'Unknown')
+            # Strip the Rust* prefix so UI dispatchers (which compare
+            # against "Track" / "Album" / "Artist" / "Mix" / "Playlist")
+            # route the click correctly. Without this, RustTrack items
+            # fell through to show_album_details and opened a track as
+            # an album page.
+            cls_name = type(item).__name__
+            type_label = cls_name[4:] if cls_name.startswith("Rust") else cls_name
             data = {
                 'obj': item,
                 'name': _name,
                 'sub_title': '',
                 'image_url': self.get_artwork_url(item, 320),
-                'type': type(item).__name__ 
+                'type': type_label,
             }
             
             # 补充子标题
@@ -3255,6 +3426,22 @@ class TidalBackend:
         # Playlist artwork is often exposed via object methods/typed fields;
         # UUID-to-resources URL synthesis can fail with 403 on some objects.
         if "Playlist" in type(obj).__name__:
+            # TIDAL playlists carry two image UUIDs:
+            #   squareImage → 1:1 (320/640/1080 sizes available)
+            #   image       → 16:10 wide  (480x320 / 750x500 only)
+            # Square sizes don't exist for the wide UUID, so requesting
+            # 320x320 against `image` returns S3 403. Prefer squareImage.
+            sq = getattr(obj, "square_image", None) or getattr(obj, "squareImage", None)
+            if isinstance(sq, str) and len(sq) > 20 and "http" not in sq:
+                path = sq.replace("-", "/")
+                return f"https://resources.tidal.com/images/{path}/{int(size)}x{int(size)}.jpg"
+            wide = getattr(obj, "image", None)
+            if isinstance(wide, str) and len(wide) > 20 and "http" not in wide:
+                # Only 480x320 and 750x500 are valid for `image`; pick whichever
+                # is closer to the caller's requested square edge.
+                wide_w, wide_h = (480, 320) if int(size) <= 480 else (750, 500)
+                path = wide.replace("-", "/")
+                return f"https://resources.tidal.com/images/{path}/{wide_w}x{wide_h}.jpg"
             scanned = self._scan_image_like_attrs(obj, size=size)
             if scanned:
                 return scanned
@@ -3262,6 +3449,10 @@ class TidalBackend:
             if pl_id:
                 try:
                     full_pl = self._rust_playlist(pl_id)
+                    sq = getattr(full_pl, "square_image", None) or getattr(full_pl, "squareImage", None)
+                    if isinstance(sq, str) and len(sq) > 20 and "http" not in sq:
+                        path = sq.replace("-", "/")
+                        return f"https://resources.tidal.com/images/{path}/{int(size)}x{int(size)}.jpg"
                     scanned_full = self._scan_image_like_attrs(full_pl, size=size)
                     if scanned_full:
                         return scanned_full
@@ -3318,8 +3509,9 @@ class TidalBackend:
                 except Exception as e:
                     logger.debug("Failed to resolve artwork from images on %s: %s", type(obj).__name__, e)
 
-            # 属性探测
-            check_attrs = ['picture_id', 'cover_id', 'picture', 'cover', 'image', 'avatar', 'square_image']
+            # 属性探测 — square_image listed before `image` because TIDAL's
+            # wide `image` UUID has no square dimensions on the CDN (403).
+            check_attrs = ['picture_id', 'cover_id', 'picture', 'cover', 'square_image', 'avatar', 'image']
             for attr in check_attrs:
                 val = getattr(obj, attr, None)
                 if not (val and isinstance(val, str)):
