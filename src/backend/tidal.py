@@ -1,5 +1,6 @@
 import tidalapi
 import tidalapi.user as tidal_user
+import concurrent.futures
 import logging
 import os
 import json
@@ -13,6 +14,11 @@ from urllib.parse import urlparse
 from core.errors import classify_exception
 from core.http_session import get_global_session
 from utils.paths import get_cache_dir, get_config_dir
+from _rust.tidal import (
+    get_rust_tidal_core,
+    RustTidalCoreError,
+    RustTidalCoreUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +35,27 @@ class TidalBackend:
         self._migrate_token_from_cache()
         self.user = None
         self.quality = self._get_best_quality()
-        self._apply_global_config() 
+        self._apply_global_config()
+        # Rust auth core is authoritative starting Phase 1: it owns the
+        # PKCE / OAuth flows and the on-disk token file. The tidalapi
+        # `self.session` is mirrored from the Rust state on every auth
+        # event so Phase 2-6 surfaces that still call tidalapi keep
+        # working — Phase 7 deletes the mirror and tidalapi entirely.
+        self._rust_core = get_rust_tidal_core()
+        self._rust_session = None
+        self._pending_oauth_thread = None
+        if self._rust_core.available:
+            try:
+                self._rust_session = self._rust_core.new_session(
+                    pool_size=int(os.getenv("HIRESTI_HTTP_POOL_SIZE", "64") or 64)
+                )
+            except RustTidalCoreError as e:
+                logger.warning("rust_tidal_core session init failed: %s", e)
+        else:
+            logger.warning(
+                "rust_tidal_core .so not loaded — auth/persistence will fall back to "
+                "tidalapi until the crate is built (cargo build --release)."
+            )
         self.fav_album_ids = set()
         self.fav_artist_ids = set()
         self.fav_track_ids = set()
@@ -284,12 +310,20 @@ class TidalBackend:
         self._set_last_login_error("")
         self.session = tidalapi.Session()
         self._apply_global_config()
-        login_url_obj, future = self.session.login_oauth()
-        verification_uri_complete = getattr(login_url_obj, "verification_uri_complete", None)
-        verification_uri = getattr(login_url_obj, "verification_uri", None)
-        user_code = getattr(login_url_obj, "user_code", None)
 
-        raw_url = verification_uri_complete or verification_uri or str(login_url_obj or "")
+        if self._rust_session is None:
+            raise RuntimeError(
+                "rust_tidal_core is unavailable — build src_rust/rust_tidal_core (cargo build --release)."
+            )
+        login = self._rust_session.oauth_device_start()
+
+        verification_uri_complete = login.get("verification_uri_complete") or ""
+        verification_uri = login.get("verification_uri") or ""
+        user_code = login.get("user_code") or ""
+        interval = max(1, int(login.get("interval", 2) or 2))
+        expires_in = max(60, int(login.get("expires_in", 300) or 300))
+
+        raw_url = verification_uri_complete or verification_uri
         normalized_url, normalized = self._normalize_oauth_url(raw_url)
         if not normalized_url:
             raise RuntimeError("OAuth URL is empty")
@@ -302,6 +336,8 @@ class TidalBackend:
             normalized,
             bool(user_code),
         )
+
+        future = self._spawn_oauth_poll_future(interval, expires_in)
         return {
             "url": normalized_url,
             "future": future,
@@ -309,6 +345,34 @@ class TidalBackend:
             "verification_uri": str(verification_uri or "").strip(),
             "normalized": normalized,
         }
+
+    def _spawn_oauth_poll_future(self, interval_s, expires_in_s):
+        """Run the device-code poll in a daemon thread and resolve a Future
+        on completion. Mirrors the shape tidalapi.login_oauth() returned, so
+        callers calling future.result() keep working unchanged."""
+        future: concurrent.futures.Future = concurrent.futures.Future()
+
+        def _run():
+            deadline = time.monotonic() + expires_in_s
+            try:
+                while time.monotonic() < deadline:
+                    if self._rust_session is None:
+                        raise RuntimeError("rust session disposed during OAuth login")
+                    result = self._rust_session.oauth_device_poll()
+                    if isinstance(result, dict) and result.get("status") == "ok":
+                        future.set_result(result.get("user"))
+                        return
+                    time.sleep(interval_s)
+                future.set_exception(TimeoutError("OAuth login link expired"))
+            except RustTidalCoreError as e:
+                future.set_exception(e)
+            except Exception as e:  # noqa: BLE001
+                future.set_exception(e)
+
+        thread = threading.Thread(target=_run, name="rtc-oauth-poll", daemon=True)
+        self._pending_oauth_thread = thread
+        thread.start()
+        return future
 
     def _normalize_oauth_url(self, url):
         raw = str(url or "").strip()
@@ -325,16 +389,11 @@ class TidalBackend:
     def finish_login(self, future):
         try:
             future.result()
-            if self.session.check_login():
-                self.user = self.session.user
-                self._tune_http_pool()  # Ensure pool is tuned after session is ready
-                self.save_session()
-                self.refresh_favorite_ids()
-                self._apply_global_config()
-                self._set_last_login_error("")
-                return True
-            self._set_last_login_error("OAuth completed but session is not logged in.")
-            logger.warning("Login failed: %s", self.get_last_login_error())
+            if not self._post_login_finalize(reason="oauth"):
+                self._set_last_login_error("OAuth completed but session is not logged in.")
+                logger.warning("Login failed: %s", self.get_last_login_error())
+                return False
+            return True
         except Exception as e:
             detail = self._format_login_error(e)
             self._set_last_login_error(detail)
@@ -352,37 +411,65 @@ class TidalBackend:
         self._set_last_login_error("")
         self.session = tidalapi.Session()
         self._apply_global_config()
-        url = self.session.pkce_login_url()
+        if self._rust_session is None:
+            raise RuntimeError(
+                "rust_tidal_core is unavailable — build src_rust/rust_tidal_core (cargo build --release)."
+            )
+        url = self._rust_session.pkce_login_url()
         logger.info("PKCE login URL prepared.")
         return {"url": url}
 
     def finish_pkce_login(self, redirect_url):
         # Called once the user pastes the redirect URL of the Tidal "Oops"
-        # page back into our login dialog.  Extracts the auth code, swaps
-        # it for an access/refresh token pair, and marks the session as
-        # PKCE so save_session preserves the `is_pkce` flag.
+        # page back into our login dialog.  Rust extracts the auth code,
+        # swaps it for an access/refresh token pair, and stores it as a
+        # PKCE token so save_session preserves the `is_pkce` flag.
         try:
-            token_json = self.session.pkce_get_auth_token(redirect_url)
-            self.session.process_auth_token(token_json, is_pkce_token=True)
-            if self.session.check_login():
-                self.user = self.session.user
-                self._tune_http_pool()
-                self.save_session()
-                self.refresh_favorite_ids()
-                self._apply_global_config()
-                self._set_last_login_error("")
-                return True
-            self._set_last_login_error(
-                "PKCE token exchange succeeded but session is not logged in."
-            )
-            logger.warning("PKCE login failed: %s", self.get_last_login_error())
+            if self._rust_session is None:
+                raise RuntimeError("rust_tidal_core is unavailable")
+            self._rust_session.pkce_finish(redirect_url)
+            if not self._post_login_finalize(reason="pkce"):
+                self._set_last_login_error(
+                    "PKCE token exchange succeeded but session is not logged in."
+                )
+                logger.warning("PKCE login failed: %s", self.get_last_login_error())
+                return False
+            return True
         except Exception as e:
             detail = self._format_login_error(e)
             self._set_last_login_error(detail)
             logger.error("PKCE login failed: %s", detail)
         return False
 
+    def _post_login_finalize(self, reason):
+        """After the Rust session has acquired a token (PKCE or device-code),
+        mirror state into tidalapi.Session, run the unified post-login wiring,
+        and persist. Returns True on success."""
+        if self._rust_session is None:
+            return False
+        if not self._rust_session.check_login():
+            return False
+        persisted = self._rust_session.persisted_snapshot()
+        if not persisted:
+            return False
+        tidalapi_session = self._mirror_to_tidalapi_session(persisted)
+        if tidalapi_session is None:
+            return False
+        self.session = tidalapi_session
+        self.user = tidalapi_session.user
+        self._tune_http_pool()
+        self.save_session()
+        self.refresh_favorite_ids()
+        self._apply_global_config()
+        self._set_last_login_error("")
+        return True
+
     def check_login(self):
+        if self._rust_session is not None:
+            try:
+                return self._rust_session.check_login()
+            except RustTidalCoreError as e:
+                logger.debug("rust check_login error [%s]: %s", e.kind, e)
         return self.session.check_login()
 
     def _serialize_expiry(self, value):
@@ -413,23 +500,29 @@ class TidalBackend:
             logger.warning("Token file migration failed: %s", e)
 
     def save_session(self):
-        os.makedirs(os.path.dirname(self.token_file), exist_ok=True)
-        data = {
+        # Rust core owns the on-disk token format (atomic rename + 0600 perms
+        # + the same JSON schema previous versions wrote, so existing
+        # ~/.config/hiresti/hiresti_token.json files keep loading).
+        persisted = {
             'token_type': self.session.token_type,
             'access_token': self.session.access_token,
             'refresh_token': self.session.refresh_token,
             'expiry_time': self._serialize_expiry(self.session.expiry_time),
-            # is_pkce determines whether tidalapi requests HiRes / LOSSLESS
-            # streams from the legacy endpoint, so it must round-trip
-            # through the saved-token file.  Default False keeps existing
-            # OAuth-token files working without re-login.
+            # is_pkce determines whether the playback endpoint returns
+            # HiRes / LOSSLESS streams, so it must round-trip through the
+            # saved-token file.  Default False keeps existing OAuth-token
+            # files working without re-login.
             'is_pkce': bool(getattr(self.session, 'is_pkce', False)),
         }
-        temp_file = f"{self.token_file}.tmp"
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f)
-        os.replace(temp_file, self.token_file)
-        os.chmod(self.token_file, 0o600)
+        if self._rust_core.available:
+            self._rust_core.token_write_file(self.token_file, persisted)
+        else:
+            os.makedirs(os.path.dirname(self.token_file), exist_ok=True)
+            temp_file = f"{self.token_file}.tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(persisted, f)
+            os.replace(temp_file, self.token_file)
+            os.chmod(self.token_file, 0o600)
         logger.debug("Session saved to %s", self.token_file)
 
     def _read_saved_session_data(self):
@@ -440,32 +533,62 @@ class TidalBackend:
         if not os.path.exists(self.token_file):
             return None
 
-        with open(self.token_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        if self._rust_core.available:
+            try:
+                data = self._rust_core.token_read_file(self.token_file)
+            except RustTidalCoreError as e:
+                logger.warning("Session file unreadable [%s]: %s", e.kind, e)
+                return None
+        else:
+            with open(self.token_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
 
-        required = ('token_type', 'access_token', 'refresh_token', 'expiry_time')
-        if not all(k in data for k in required):
+        required = ('token_type', 'access_token', 'refresh_token')
+        if not all(data.get(k) for k in required):
             logger.warning("Session file invalid: missing required fields.")
             return None
         return data
 
+    def _mirror_to_tidalapi_session(self, persisted):
+        """Bridge Rust auth state into tidalapi.Session so endpoint surfaces
+        not yet migrated keep working. Triggers tidalapi's own /v1/sessions
+        call; that's intentional — Rust already validated the token, we want
+        tidalapi's User factory cache populated for downstream consumers."""
+        new_session = tidalapi.Session()
+        self._apply_global_config(session_obj=new_session)
+        ok = new_session.load_oauth_session(
+            persisted.get('token_type'),
+            persisted.get('access_token'),
+            persisted.get('refresh_token'),
+            self._deserialize_expiry(persisted.get('expiry_time')),
+            is_pkce=bool(persisted.get('is_pkce', False)),
+        )
+        if not ok:
+            return None
+        return new_session
+
     def _restore_session_from_saved_data(self, data, reason="restore"):
         try:
-            new_session = tidalapi.Session()
-            self._apply_global_config(session_obj=new_session)
-            new_session.load_oauth_session(
-                data['token_type'],
-                data['access_token'],
-                data['refresh_token'],
-                self._deserialize_expiry(data['expiry_time']),
-                is_pkce=bool(data.get('is_pkce', False)),
-            )
-            if not new_session.check_login():
-                logger.warning("Session %s failed: check_login returned false.", reason)
-                return False
+            if self._rust_session is not None:
+                # Rust core: load token, fetch user info via /v1/sessions, run
+                # check_login. Authoritative path.
+                self._rust_session.load_token(data)
+                if not self._rust_session.check_login():
+                    logger.warning("Session %s failed: rust check_login returned false.", reason)
+                    return False
+                tidalapi_session = self._mirror_to_tidalapi_session(data)
+                if tidalapi_session is None:
+                    logger.warning("Session %s: tidalapi mirror failed.", reason)
+                    return False
+            else:
+                # Fallback path used only when the .so failed to load.
+                tidalapi_session = self._mirror_to_tidalapi_session(data)
+                if tidalapi_session is None or not tidalapi_session.check_login():
+                    logger.warning("Session %s failed: tidalapi check_login false.", reason)
+                    return False
 
-            self.session = new_session
-            self.user = new_session.user
+            self.session = tidalapi_session
+            self.user = tidalapi_session.user
             self._tune_http_pool()
             self._apply_global_config()
             self._set_last_login_error("")
@@ -474,6 +597,9 @@ class TidalBackend:
             except Exception as e:
                 logger.debug("Session save after %s skipped: %s", reason, e)
             return True
+        except RustTidalCoreError as e:
+            logger.warning("Session %s rust error [%s]: %s", reason, e.kind, e)
+            return False
         except Exception as e:
             logger.warning("Session %s error [%s]: %s", reason, classify_exception(e), e)
             return False
@@ -3842,6 +3968,21 @@ class TidalBackend:
                     logger.warning("Failed to remove token file %s: %s", token_path, e)
         self.user = None
         self.session = tidalapi.Session()
+        # Drop the Rust session and create a fresh one so any cached
+        # token state and pending PKCE/device challenges are gone.
+        if self._rust_session is not None:
+            try:
+                self._rust_session.close()
+            except Exception as e:
+                logger.debug("rust session close on logout failed: %s", e)
+            self._rust_session = None
+        if self._rust_core.available:
+            try:
+                self._rust_session = self._rust_core.new_session(
+                    pool_size=int(os.getenv("HIRESTI_HTTP_POOL_SIZE", "64") or 64)
+                )
+            except RustTidalCoreError as e:
+                logger.warning("rust_tidal_core re-init after logout failed: %s", e)
         self.fav_album_ids = set()
         self.fav_track_ids = set()
         self._cached_albums = []
