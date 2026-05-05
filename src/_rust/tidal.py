@@ -1,16 +1,24 @@
 """ctypes loader for rust_tidal_core.
 
-Exposes a thin Python class hierarchy mirroring the parts of tidalapi.Session
-that hiresTI actually uses. Phases progressively shift each surface from
-tidalapi to this module:
+The Rust crate handles every TIDAL surface hiresTI actually uses: auth +
+token persistence, generic authenticated HTTP, model fetchers + parsers,
+favorites + library listings, album/playlist/mix item drains, stream
+URLs + manifest decoding, lyrics, and the artist tail surfaces (top
+tracks, albums, EPs/singles, similar). The Python side here is just the
+ctypes bindings + a small wrapper class hierarchy that gives backend
+code attribute access in the tidalapi shape it already used.
 
-  Phase 1 (current): auth + session persistence + check_login + token refresh.
-  Phase 2: HTTP / page.get.
-  Phase 3+: model constructors, favorites, playback, etc.
+Wrappers are pure read-only views over the Rust JSON. There's no lazy
+proxy fallback — an unknown attribute raises AttributeError instead of
+silently spending a network round-trip. The handful of surfaces still
+served via tidalapi (pages, home v1, search fallback) live in
+backend/tidal.py and are accessed there directly, not through these
+wrappers.
 
 The loader silently no-ops if the .so isn't present so app boot stays
-unaffected during the migration window — backend/tidal.py falls back to
-tidalapi for any surface that doesn't yet have a Rust implementation.
+unaffected when the crate hasn't been built; backend/tidal.py treats
+that as a hard requirement for the live paths and falls back to tidalapi
+only for the bootstrap case.
 """
 
 from __future__ import annotations
@@ -527,20 +535,19 @@ def _scrub_params(params: Optional[dict]) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Hybrid model wrappers (Phase 3)
+# Rust model wrappers
 # ---------------------------------------------------------------------------
 #
 # Each Rust-fetched model is presented to backend/tidal.py as an object with
 # attribute access matching the tidalapi shape callers already use:
 #   track.id, track.name, track.duration, track.album.cover, ...
 #
-# Method calls (.tracks(), .items(), .add(), .delete(), .lyrics(),
-# .get_stream()) are not yet implemented in Rust — those land in Phase 4-6.
-# Until then the wrapper lazily delegates them to a tidalapi proxy
-# constructed on demand. That bridge disappears in Phase 7.
-
-
-_PROXY_FAILED = object()  # sentinel: tidalapi proxy construction has failed for this wrapper
+# Phase 7: the lazy tidalapi proxy is gone — every method that callers used
+# to reach via attribute access (.tracks, .items, .lyrics, .get_url,
+# .get_stream, ...) is either a real method on the subclass (drains the
+# Rust list dispatcher) or backed by a TidalBackend method that hits Rust
+# directly. Wrappers are now pure read-only views; an unknown attribute
+# raises AttributeError instead of silently spending an HTTP round-trip.
 
 
 class _NestedRef:
@@ -573,26 +580,19 @@ class _NestedRef:
 
 
 class _RustModelBase:
-    """Base for hybrid Rust+tidalapi models. Subclasses set
-    `_tidalapi_factory` (a callable taking `tidalapi_session` -> proxy) so
-    method calls fall through to tidalapi until Phase 4+ replace them."""
+    """Read-only view over a Rust model dict.
 
-    _tidalapi_factory = None  # type: Any
-    # Cheap aliases for fields whose name differs between Rust JSON and
-    # tidalapi/TIDAL upstream naming. Hits here avoid building a tidalapi
-    # proxy (which would round-trip GET albums/{id} just to read .title).
-    # Bidirectional: Album/Track/Artist/Playlist use `name`, Mix uses
-    # `title` — code that probes either should land on whichever the
-    # underlying model stores.
+    Attribute access maps directly to Rust JSON keys. Nested dicts are
+    auto-wrapped as `_NestedRef` so chains like `track.album.cover` keep
+    working without consulting any side-channel proxy. The bidirectional
+    `title`↔`name` alias is the only naming smoothing we apply, since
+    Album/Track/Artist/Playlist use `name` while Mix uses `title`.
+    """
+
+    # Bidirectional alias — Album/Track/Artist/Playlist store name, Mix
+    # stores title. Either probe order returns the value whichever side
+    # the underlying Rust struct uses.
     _FIELD_ALIASES = {"title": "name", "name": "title"}
-    # Explicit allowlist of attribute names that should fall through to
-    # the tidalapi proxy. Constructing the proxy fires an HTTP fetch
-    # (tidalapi.Album/Track/Artist all GET on __init__), so any unknown
-    # attribute we DON'T list here will raise AttributeError instead of
-    # silently spending a network round-trip — important because
-    # get_artwork_url and similar code paths probe ~12 attribute names
-    # per item, which used to cost ~12 HTTP fetches per home-page card.
-    _PROXY_METHODS: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -601,15 +601,13 @@ class _RustModelBase:
         rust_session: Optional["RustTidalSession"] = None,
     ) -> None:
         object.__setattr__(self, "_data", dict(data or {}))
+        # tidalapi_session is retained as an attribute purely so a few
+        # remaining backend paths (search/page/home) can pass through; the
+        # wrapper itself never calls into it.
         object.__setattr__(self, "_tidalapi_session", tidalapi_session)
         object.__setattr__(self, "_rust_session", rust_session)
-        object.__setattr__(self, "_tidalapi_proxy", None)
 
     def __getattr__(self, name: str) -> Any:
-        # Rust-known fields take priority. Nested dicts wrap as _NestedRef so
-        # `track.album.cover` keeps working. Direct hit wins; otherwise try
-        # the bidirectional alias (so name↔title works whichever side a
-        # given model stores).
         data = self.__dict__.get("_data") or {}
         for key in (name, self._FIELD_ALIASES.get(name)):
             if key is not None and key in data:
@@ -619,48 +617,10 @@ class _RustModelBase:
                 if isinstance(v, list) and v and isinstance(v[0], dict):
                     return [_NestedRef(item) for item in v]
                 return v
-        # Only known proxy methods fall through. Arbitrary attribute reads
-        # that happen to miss our Rust data (cover_url, picture, image,
-        # description, ...) raise AttributeError instead of triggering an
-        # HTTP fetch.
-        if name in self._PROXY_METHODS:
-            proxy = self._ensure_proxy()
-            if proxy is not None:
-                return getattr(proxy, name)
         raise AttributeError(
             f"{type(self).__name__} has no attribute {name!r} "
             f"(rust fields: {sorted(data)})"
         )
-
-    def _ensure_proxy(self):
-        proxy = self.__dict__.get("_tidalapi_proxy")
-        if proxy is _PROXY_FAILED:
-            return None
-        if proxy is not None:
-            return proxy
-        factory = type(self)._tidalapi_factory
-        session = self.__dict__.get("_tidalapi_session")
-        if not factory or session is None:
-            object.__setattr__(self, "_tidalapi_proxy", _PROXY_FAILED)
-            return None
-        try:
-            proxy = factory(session, self.__dict__["_data"])
-        except Exception as e:  # noqa: BLE001
-            # Cache the failure: tidalapi factories that raise (e.g.
-            # session.album(id) → ObjectNotFound for a dead catalog entry)
-            # will keep raising. Without this sentinel, every attribute
-            # miss on the wrapper re-fires the same HTTP 404 — get_artwork_url
-            # alone probes ~12 missing attrs and amplifies one dead ID into
-            # a 12x request storm.
-            logger.debug(
-                "tidalapi proxy construction failed for %s: %s",
-                type(self).__name__,
-                e,
-            )
-            object.__setattr__(self, "_tidalapi_proxy", _PROXY_FAILED)
-            return None
-        object.__setattr__(self, "_tidalapi_proxy", proxy)
-        return proxy
 
     def to_dict(self) -> dict:
         return dict(self._data)
@@ -668,33 +628,6 @@ class _RustModelBase:
     def __repr__(self) -> str:
         d = self.__dict__.get("_data") or {}
         return f"{type(self).__name__}(id={d.get('id')!r}, name={d.get('name') or d.get('title')!r})"
-
-
-def _make_track_proxy(session, data):
-    return session.track(data["id"]) if data.get("id") else None
-
-
-def _make_album_proxy(session, data):
-    return session.album(data["id"]) if data.get("id") else None
-
-
-def _make_artist_proxy(session, data):
-    return session.artist(data["id"]) if data.get("id") else None
-
-
-def _make_playlist_proxy(session, data):
-    return session.playlist(data["id"]) if data.get("id") else None
-
-
-def _make_mix_proxy(session, data):
-    return session.mix(data["id"]) if data.get("id") else None
-
-
-def _make_folder_proxy(session, data):
-    fn = getattr(session, "folder", None)
-    if fn is None:
-        return None
-    return fn(data["id"]) if data.get("id") else None
 
 
 def _drain_pages(rust_session, kind: str, *, page_size: int = 100, **list_kwargs):
@@ -733,35 +666,19 @@ def _drain_pages(rust_session, kind: str, *, page_size: int = 100, **list_kwargs
 
 
 class RustTrack(_RustModelBase):
-    _tidalapi_factory = staticmethod(_make_track_proxy)
-    # Stream methods are served by Rust directly via TidalBackend now;
-    # the proxy fallback exists only for code paths that still touch
-    # full_track.get_url() when the .so isn't loaded.
-    _PROXY_METHODS = frozenset({
-        "get_url", "get_stream", "get_stream_manifest", "get_manifest_data",
-    })
-
     def lyrics(self):
-        """Phase 6: Rust-native lyrics. Returns a small object with
-        `.text`, `.subtitles`, `.right_to_left`, `.lyrics_provider`. Falls
-        back to the tidalapi proxy if the Rust path errors (e.g. crate
-        not loaded), so existing call sites keep working unchanged."""
+        """Rust-native lyrics. Returns a `_LyricsView` (text/subtitles/
+        right_to_left/lyrics_provider). The view is falsy when neither
+        text nor subtitles are present, so callers can do `if lyrics:`."""
         rust_session = self.__dict__.get("_rust_session")
         tid = self._data.get("id")
         if rust_session is None or not tid:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return None
-            return proxy.lyrics()
+            return None
         try:
-            data = rust_session.track_lyrics(int(tid))
+            return _LyricsView(rust_session.track_lyrics(int(tid)))
         except RustTidalCoreError as e:
-            logger.debug("rust track_lyrics(%s) error [%s]: %s", tid, e.kind, e)
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return None
-            return proxy.lyrics()
-        return _LyricsView(data)
+            logger.debug("rust track_lyrics(%s) [%s]: %s", tid, e.kind, e)
+            return None
 
 
 class _LyricsView:
@@ -797,37 +714,26 @@ class _LyricsView:
 
 
 class RustAlbum(_RustModelBase):
-    _tidalapi_factory = staticmethod(_make_album_proxy)
-    _PROXY_METHODS = frozenset()
-
     def tracks(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
         if rust_session is None or not self._data.get("id"):
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+            return []
         try:
             if limit is None:
                 items = _drain_pages(
-                    rust_session,
-                    "album_tracks",
-                    page_size=100,
-                    id=int(self._data["id"]),
+                    rust_session, "album_tracks",
+                    page_size=100, id=int(self._data["id"]),
                 )
             else:
                 page = rust_session.list(
                     "album_tracks",
-                    limit=int(limit),
-                    offset=int(offset),
+                    limit=int(limit), offset=int(offset),
                     id=int(self._data["id"]),
                 )
                 items = (page or {}).get("items") or []
-        except RustTidalCoreError:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+        except RustTidalCoreError as e:
+            logger.debug("rust album_tracks(%s) [%s]: %s", self._data.get("id"), e.kind, e)
+            return []
         ts = self.__dict__.get("_tidalapi_session")
         return [wrap_model("track", t, tidalapi_session=ts, rust_session=rust_session) for t in items or []]
 
@@ -836,43 +742,31 @@ class RustAlbum(_RustModelBase):
 
 
 class RustArtist(_RustModelBase):
-    _tidalapi_factory = staticmethod(_make_artist_proxy)
-    _PROXY_METHODS = frozenset()
+    pass
 
 
 class RustPlaylist(_RustModelBase):
-    _tidalapi_factory = staticmethod(_make_playlist_proxy)
-    _PROXY_METHODS = frozenset()
-
     def tracks(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
         pid = self._data.get("id")
         if rust_session is None or not pid:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+            return []
         try:
             if limit is None:
                 items = _drain_pages(
-                    rust_session,
-                    "playlist_tracks",
-                    page_size=100,
-                    id=str(pid),
+                    rust_session, "playlist_tracks",
+                    page_size=100, id=str(pid),
                 )
             else:
                 page = rust_session.list(
                     "playlist_tracks",
-                    limit=int(limit),
-                    offset=int(offset),
+                    limit=int(limit), offset=int(offset),
                     id=str(pid),
                 )
                 items = (page or {}).get("items") or []
-        except RustTidalCoreError:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+        except RustTidalCoreError as e:
+            logger.debug("rust playlist_tracks(%s) [%s]: %s", pid, e.kind, e)
+            return []
         ts = self.__dict__.get("_tidalapi_session")
         return [wrap_model("track", t, tidalapi_session=ts, rust_session=rust_session) for t in items or []]
 
@@ -880,34 +774,26 @@ class RustPlaylist(_RustModelBase):
         rust_session = self.__dict__.get("_rust_session")
         pid = self._data.get("id")
         if rust_session is None or not pid:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+            return []
         try:
             if limit is None:
                 items = _drain_pages(
-                    rust_session,
-                    "playlist_items",
-                    page_size=100,
-                    id=str(pid),
+                    rust_session, "playlist_items",
+                    page_size=100, id=str(pid),
                 )
             else:
                 page = rust_session.list(
                     "playlist_items",
-                    limit=int(limit),
-                    offset=int(offset),
+                    limit=int(limit), offset=int(offset),
                     id=str(pid),
                 )
                 items = (page or {}).get("items") or []
-        except RustTidalCoreError:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+        except RustTidalCoreError as e:
+            logger.debug("rust playlist_items(%s) [%s]: %s", pid, e.kind, e)
+            return []
         ts = self.__dict__.get("_tidalapi_session")
-        # Each item is {"kind": "track" | "video", ...}; extract the inner
-        # model so callers can keep using attribute access.
+        # Each item is {"kind": "track" | "video", ...}; unwrap so the
+        # caller can still use attribute access.
         out = []
         for it in items or []:
             if not isinstance(it, dict):
@@ -919,38 +805,27 @@ class RustPlaylist(_RustModelBase):
 
 
 class RustMix(_RustModelBase):
-    _tidalapi_factory = staticmethod(_make_mix_proxy)
-    _PROXY_METHODS = frozenset()
-
     def items(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
         mid = self._data.get("id")
         if rust_session is None or not mid:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+            return []
         try:
             if limit is None:
                 items = _drain_pages(
-                    rust_session,
-                    "mix_items",
-                    page_size=100,
-                    id=str(mid),
+                    rust_session, "mix_items",
+                    page_size=100, id=str(mid),
                 )
             else:
                 page = rust_session.list(
                     "mix_items",
-                    limit=int(limit),
-                    offset=int(offset),
+                    limit=int(limit), offset=int(offset),
                     id=str(mid),
                 )
                 items = (page or {}).get("items") or []
-        except RustTidalCoreError:
-            proxy = self._ensure_proxy()
-            if proxy is None:
-                return []
-            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+        except RustTidalCoreError as e:
+            logger.debug("rust mix_items(%s) [%s]: %s", mid, e.kind, e)
+            return []
         ts = self.__dict__.get("_tidalapi_session")
         out = []
         for it in items or []:
@@ -963,11 +838,11 @@ class RustMix(_RustModelBase):
 
 
 class RustFolder(_RustModelBase):
-    _tidalapi_factory = staticmethod(_make_folder_proxy)
+    pass
 
 
 class RustVideo(_RustModelBase):
-    _tidalapi_factory = None
+    pass
 
 
 def wrap_model(kind: str, data: dict, tidalapi_session=None, rust_session=None):
