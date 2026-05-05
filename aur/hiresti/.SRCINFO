@@ -28,7 +28,6 @@ pkgbase = hiresti
 	depends = python-ratelimit
 	depends = python-requests
 	depends = python-six
-	depends = python-tidalapi
 	depends = python-typing_extensions
 	depends = python-setproctitle
 	depends = libusb

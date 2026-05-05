@@ -1,5 +1,6 @@
 # hiresTI Desktop Dependencies
-tidalapi>=0.7.0
+# tidalapi was removed in commit de7020a; TIDAL HTTP/auth/streaming
+# now lives in src_rust/rust_tidal_core (built via cargo).
 PyGObject>=3.42.0
 PyOpenGL>=3.1.0
 requests>=2.28.0

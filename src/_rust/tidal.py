@@ -1,24 +1,22 @@
 """ctypes loader for rust_tidal_core.
 
-The Rust crate handles every TIDAL surface hiresTI actually uses: auth +
-token persistence, generic authenticated HTTP, model fetchers + parsers,
+The Rust crate handles every TIDAL surface hiresTI uses: auth + token
+persistence, generic authenticated HTTP, model fetchers + parsers,
 favorites + library listings, album/playlist/mix item drains, stream
-URLs + manifest decoding, lyrics, and the artist tail surfaces (top
-tracks, albums, EPs/singles, similar). The Python side here is just the
-ctypes bindings + a small wrapper class hierarchy that gives backend
-code attribute access in the tidalapi shape it already used.
+URLs + manifest decoding, lyrics, the artist tail surfaces (top
+tracks, albums, EPs/singles, similar), and the /pages/* dispatcher.
+The Python side here is just the ctypes bindings + a small wrapper
+class hierarchy that gives backend code attribute access in the
+shape it already used.
 
 Wrappers are pure read-only views over the Rust JSON. There's no lazy
 proxy fallback — an unknown attribute raises AttributeError instead of
-silently spending a network round-trip. The handful of surfaces still
-served via tidalapi (pages, home v1, search fallback) live in
-backend/tidal.py and are accessed there directly, not through these
-wrappers.
+silently spending a network round-trip.
 
-The loader silently no-ops if the .so isn't present so app boot stays
-unaffected when the crate hasn't been built; backend/tidal.py treats
-that as a hard requirement for the live paths and falls back to tidalapi
-only for the bootstrap case.
+The loader silently no-ops if the .so isn't present, but the live read
+paths in backend/tidal.py treat the crate as a hard requirement: a
+cold start without the .so raises RustTidalCoreUnavailable rather than
+falling through to a (no-longer-present) Python TIDAL client.
 """
 
 from __future__ import annotations
