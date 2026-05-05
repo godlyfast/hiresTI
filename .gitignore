@@ -32,3 +32,7 @@ Cargo.lock
 # Profiling captures
 perf.data
 perf.data.old
+
+# Captured tidalapi fixtures (contain personal library + access tokens) —
+# sanitized samples for committed tests live under tests/fixtures/tidal/samples/.
+tests/fixtures/tidal/captured/
