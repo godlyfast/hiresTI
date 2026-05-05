@@ -895,27 +895,11 @@ class TidalBackend:
         self._cached_albums_ts = 0.0
 
     def _toggle_favorite(self, kind, item_id, add):
-        """Phase 4: route favorite add/remove through Rust. Falls back to
-        tidalapi if the .so is missing."""
-        if self._rust_session is not None:
-            try:
-                if add:
-                    return self._rust_session.favorites_add(kind, item_id)
-                return self._rust_session.favorites_remove(kind, item_id)
-            except RustTidalCoreError as e:
-                logger.debug("rust favorite %s/%s error [%s]: %s", kind, item_id, e.kind, e)
-        fav = self.user.favorites
-        if kind == "album":
-            (fav.add_album if add else fav.remove_album)(item_id)
-        elif kind == "artist":
-            (fav.add_artist if add else fav.remove_artist)(item_id)
-        elif kind == "track":
-            adder = getattr(fav, "add_track", None) or (lambda i: fav.add_tracks([i]))
-            remover = getattr(fav, "remove_track", None) or (lambda i: fav.remove_tracks([i]))
-            (adder if add else remover)(item_id)
-        else:
-            raise ValueError(f"unknown favorite kind: {kind}")
-        return True
+        """Route favorite add/remove through Rust."""
+        rust = self._require_rust_session()
+        if add:
+            return rust.favorites_add(kind, item_id)
+        return rust.favorites_remove(kind, item_id)
 
     def toggle_album_favorite(self, album_id, add=True):
         try:
@@ -945,17 +929,12 @@ class TidalBackend:
 
     def toggle_mix_favorite(self, mix_id, add=True):
         # Tidal's "Mixes & Radio" favorites collection — v2 endpoint with
-        # mixIds query param. The legacy add_mixes/remove_mixes wrappers in
-        # tidalapi accept either a string or a list; we always pass a
-        # single id so the URL stays small.
+        # mixIds query param.
         try:
-            if self._rust_session is not None:
-                ok = self._rust_session.favorites_mix_toggle(str(mix_id), add)
-                if not ok:
-                    raise RuntimeError("rust mix toggle returned ok=false")
-            else:
-                fav = self.user.favorites
-                (fav.add_mixes if add else fav.remove_mixes)(str(mix_id))
+            rust = self._require_rust_session()
+            ok = rust.favorites_mix_toggle(str(mix_id), add)
+            if not ok:
+                raise RuntimeError("rust mix toggle returned ok=false")
             if add:
                 self.fav_mix_ids.add(str(mix_id))
             else:
