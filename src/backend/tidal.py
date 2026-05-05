@@ -711,18 +711,24 @@ class TidalBackend:
     def save_session(self):
         # Rust core owns the on-disk token format (atomic rename + 0600 perms
         # + the same JSON schema previous versions wrote, so existing
-        # ~/.config/hiresti/hiresti_token.json files keep loading).
-        persisted = {
-            'token_type': self.session.token_type,
-            'access_token': self.session.access_token,
-            'refresh_token': self.session.refresh_token,
-            'expiry_time': self._serialize_expiry(self.session.expiry_time),
-            # is_pkce determines whether the playback endpoint returns
-            # HiRes / LOSSLESS streams, so it must round-trip through the
-            # saved-token file.  Default False keeps existing OAuth-token
-            # files working without re-login.
-            'is_pkce': bool(getattr(self.session, 'is_pkce', False)),
-        }
+        # ~/.config/hiresti/hiresti_token.json files keep loading) and is the
+        # source of truth for the in-memory token state too.
+        persisted = None
+        if self._rust_session is not None:
+            try:
+                persisted = self._rust_session.persisted_snapshot()
+            except RustTidalCoreError as e:
+                logger.warning("rust persisted_snapshot failed [%s]: %s", e.kind, e)
+        if not persisted:
+            # Cold-start fallback (no rust core / not yet logged in via Rust):
+            # mirror tidalapi state into the same on-disk shape.
+            persisted = {
+                'token_type': self.session.token_type,
+                'access_token': self.session.access_token,
+                'refresh_token': self.session.refresh_token,
+                'expiry_time': self._serialize_expiry(self.session.expiry_time),
+                'is_pkce': bool(getattr(self.session, 'is_pkce', False)),
+            }
         if self._rust_core.available:
             self._rust_core.token_write_file(self.token_file, persisted)
         else:
