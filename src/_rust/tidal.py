@@ -597,14 +597,9 @@ class _RustModelBase:
     def __init__(
         self,
         data: dict,
-        tidalapi_session=None,
         rust_session: Optional["RustTidalSession"] = None,
     ) -> None:
         object.__setattr__(self, "_data", dict(data or {}))
-        # tidalapi_session is retained as an attribute purely so a few
-        # remaining backend paths (search/page/home) can pass through; the
-        # wrapper itself never calls into it.
-        object.__setattr__(self, "_tidalapi_session", tidalapi_session)
         object.__setattr__(self, "_rust_session", rust_session)
 
     def __getattr__(self, name: str) -> Any:
@@ -734,8 +729,7 @@ class RustAlbum(_RustModelBase):
         except RustTidalCoreError as e:
             logger.debug("rust album_tracks(%s) [%s]: %s", self._data.get("id"), e.kind, e)
             return []
-        ts = self.__dict__.get("_tidalapi_session")
-        return [wrap_model("track", t, tidalapi_session=ts, rust_session=rust_session) for t in items or []]
+        return [wrap_model("track", t, rust_session=rust_session) for t in items or []]
 
     def items(self, *args, **kwargs):
         return self.tracks(*args, **kwargs)
@@ -767,8 +761,7 @@ class RustPlaylist(_RustModelBase):
         except RustTidalCoreError as e:
             logger.debug("rust playlist_tracks(%s) [%s]: %s", pid, e.kind, e)
             return []
-        ts = self.__dict__.get("_tidalapi_session")
-        return [wrap_model("track", t, tidalapi_session=ts, rust_session=rust_session) for t in items or []]
+        return [wrap_model("track", t, rust_session=rust_session) for t in items or []]
 
     def items(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
@@ -791,16 +784,13 @@ class RustPlaylist(_RustModelBase):
         except RustTidalCoreError as e:
             logger.debug("rust playlist_items(%s) [%s]: %s", pid, e.kind, e)
             return []
-        ts = self.__dict__.get("_tidalapi_session")
-        # Each item is {"kind": "track" | "video", ...}; unwrap so the
-        # caller can still use attribute access.
         out = []
         for it in items or []:
             if not isinstance(it, dict):
                 continue
             kind = it.get("kind", "track")
             inner = {k: v for k, v in it.items() if k != "kind"}
-            out.append(wrap_model(kind, inner, tidalapi_session=ts, rust_session=rust_session))
+            out.append(wrap_model(kind, inner, rust_session=rust_session))
         return out
 
 
@@ -826,14 +816,13 @@ class RustMix(_RustModelBase):
         except RustTidalCoreError as e:
             logger.debug("rust mix_items(%s) [%s]: %s", mid, e.kind, e)
             return []
-        ts = self.__dict__.get("_tidalapi_session")
         out = []
         for it in items or []:
             if not isinstance(it, dict):
                 continue
             kind = it.get("kind", "track")
             inner = {k: v for k, v in it.items() if k != "kind"}
-            out.append(wrap_model(kind, inner, tidalapi_session=ts, rust_session=rust_session))
+            out.append(wrap_model(kind, inner, rust_session=rust_session))
         return out
 
 
@@ -845,7 +834,7 @@ class RustVideo(_RustModelBase):
     pass
 
 
-def wrap_model(kind: str, data: dict, tidalapi_session=None, rust_session=None):
+def wrap_model(kind: str, data: dict, rust_session=None):
     cls = {
         "track": RustTrack,
         "album": RustAlbum,
@@ -857,7 +846,7 @@ def wrap_model(kind: str, data: dict, tidalapi_session=None, rust_session=None):
     }.get(str(kind).lower())
     if cls is None:
         return data
-    return cls(data, tidalapi_session=tidalapi_session, rust_session=rust_session)
+    return cls(data, rust_session=rust_session)
 
 
 _singleton: Optional[_RustTidalCore] = None

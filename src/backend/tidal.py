@@ -62,11 +62,10 @@ class _RustSearchResults:
     wrapped model objects so callers using the legacy attribute or dict
     pattern keep working unchanged."""
 
-    __slots__ = ("_raw", "_tidalapi_session", "_rust_session", "_cache")
+    __slots__ = ("_raw", "_rust_session", "_cache")
 
-    def __init__(self, raw: dict, tidalapi_session, rust_session=None) -> None:
+    def __init__(self, raw: dict, rust_session=None) -> None:
         self._raw = raw or {}
-        self._tidalapi_session = tidalapi_session
         self._rust_session = rust_session
         self._cache: dict = {}
 
@@ -74,12 +73,7 @@ class _RustSearchResults:
         if key in self._cache:
             return self._cache[key]
         items = [
-            wrap_model(
-                kind,
-                item,
-                tidalapi_session=self._tidalapi_session,
-                rust_session=self._rust_session,
-            )
+            wrap_model(kind, item, rust_session=self._rust_session)
             for item in (self._raw.get(key) or [])
         ]
         self._cache[key] = items
@@ -590,7 +584,7 @@ class TidalBackend:
                 raise
             logger.debug("rust fetch_track(%s) error [%s]: %s", track_id, e.kind, e)
             return self.session.track(tid)
-        return wrap_model("track", data, tidalapi_session=self.session, rust_session=self._rust_session)
+        return wrap_model("track", data, rust_session=self._rust_session)
 
     def _rust_album(self, album_id):
         aid = int(album_id)
@@ -607,7 +601,7 @@ class TidalBackend:
                 raise
             logger.debug("rust fetch_album(%s) error [%s]: %s", album_id, e.kind, e)
             return self.session.album(aid)
-        return wrap_model("album", data, tidalapi_session=self.session, rust_session=self._rust_session)
+        return wrap_model("album", data, rust_session=self._rust_session)
 
     def _rust_artist(self, artist_or_id):
         if hasattr(artist_or_id, "id") and not isinstance(artist_or_id, (int, str)):
@@ -623,7 +617,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_artist(%s) error [%s]: %s", aid, e.kind, e)
             return self.session.artist(aid)
-        return wrap_model("artist", data, tidalapi_session=self.session, rust_session=self._rust_session)
+        return wrap_model("artist", data, rust_session=self._rust_session)
 
     def _rust_playlist(self, playlist_id):
         pid = str(playlist_id or "").strip()
@@ -636,7 +630,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_playlist(%s) error [%s]: %s", pid, e.kind, e)
             return self.session.playlist(pid)
-        return wrap_model("playlist", data, tidalapi_session=self.session, rust_session=self._rust_session)
+        return wrap_model("playlist", data, rust_session=self._rust_session)
 
     def _rust_mix(self, mix_id):
         mid = str(mix_id or "").strip()
@@ -649,7 +643,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_mix(%s) error [%s]: %s", mid, e.kind, e)
             return self.session.mix(mid)
-        return wrap_model("mix", data, tidalapi_session=self.session, rust_session=self._rust_session)
+        return wrap_model("mix", data, rust_session=self._rust_session)
 
     def _rust_folder(self, folder_id):
         fid = str(folder_id or "").strip()
@@ -662,7 +656,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_folder(%s) error [%s]: %s", fid, e.kind, e)
             return self.session.folder(fid)
-        return wrap_model("folder", data, tidalapi_session=self.session, rust_session=self._rust_session)
+        return wrap_model("folder", data, rust_session=self._rust_session)
 
     def _rust_search(self, query, limit=50):
         if self._rust_session is None:
@@ -672,7 +666,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust search('%s') error [%s]: %s", query, e.kind, e)
             return self.session.search(str(query), limit=int(limit))
-        return _RustSearchResults(raw, self.session, rust_session=self._rust_session)
+        return _RustSearchResults(raw, rust_session=self._rust_session)
 
     def _rust_parse(self, kind, data):
         kind = str(kind).lower()
@@ -685,7 +679,7 @@ class TidalBackend:
             logger.debug("rust parse_%s error [%s]: %s", kind, e.kind, e)
             fallback = getattr(self.session, f"parse_{kind}", None)
             return fallback(data) if callable(fallback) else None
-        return wrap_model(kind, parsed, tidalapi_session=self.session, rust_session=self._rust_session)
+        return wrap_model(kind, parsed, rust_session=self._rust_session)
 
     def _serialize_expiry(self, value):
         if hasattr(value, "isoformat"):
@@ -1232,12 +1226,7 @@ class TidalBackend:
                     )
                     items = (page or {}).get("items") or []
                     return [
-                        wrap_model(
-                            "artist",
-                            it,
-                            tidalapi_session=self.session,
-                            rust_session=self._rust_session,
-                        )
+                        wrap_model("artist", it, rust_session=self._rust_session)
                         for it in items
                     ]
 
@@ -1295,11 +1284,7 @@ class TidalBackend:
                         )
                         if items is not None:
                             return [
-                                wrap_model(
-                                    "album", a,
-                                    tidalapi_session=self.session,
-                                    rust_session=self._rust_session,
-                                )
+                                wrap_model("album", a, rust_session=self._rust_session)
                                 for a in items[: int(limit or 0)]
                             ]
                     except RustTidalCoreError as e:
@@ -1441,11 +1426,7 @@ class TidalBackend:
                         )
                         if items is not None:
                             wrapped = [
-                                wrap_model(
-                                    "track", t,
-                                    tidalapi_session=self.session,
-                                    rust_session=self._rust_session,
-                                )
+                                wrap_model("track", t, rust_session=self._rust_session)
                                 for t in items[:target]
                             ]
                             if wrapped:
@@ -1555,11 +1536,7 @@ class TidalBackend:
                         continue
                     seen.add(pid)
                     merged.append(
-                        wrap_model(
-                            "playlist", p,
-                            tidalapi_session=self.session,
-                            rust_session=self._rust_session,
-                        )
+                        wrap_model("playlist", p, rust_session=self._rust_session)
                     )
                 if merged:
                     return merged[: max(0, int(limit or 0)) or None]
@@ -2223,11 +2200,7 @@ class TidalBackend:
                 )
                 items = (page or {}).get("items") or []
                 return [
-                    wrap_model(
-                        "track", t,
-                        tidalapi_session=self.session,
-                        rust_session=self._rust_session,
-                    )
+                    wrap_model("track", t, rust_session=self._rust_session)
                     for t in items
                 ]
             except RustTidalCoreError as e:
@@ -2361,11 +2334,7 @@ class TidalBackend:
                     if aid:
                         seen.add(aid)
                     merged.append(
-                        wrap_model(
-                            "album", raw,
-                            tidalapi_session=self.session,
-                            rust_session=self._rust_session,
-                        )
+                        wrap_model("album", raw, rust_session=self._rust_session)
                     )
                     new_in_page += 1
                 if new_in_page == 0:
@@ -2387,11 +2356,7 @@ class TidalBackend:
                 )
                 items = (page or {}).get("items") or []
                 return [
-                    wrap_model(
-                        "artist", a,
-                        tidalapi_session=self.session,
-                        rust_session=self._rust_session,
-                    )
+                    wrap_model("artist", a, rust_session=self._rust_session)
                     for a in items
                 ]
             except RustTidalCoreError as e:
@@ -2441,11 +2406,7 @@ class TidalBackend:
                 )
                 items = (page or {}).get("items") or []
                 return [
-                    wrap_model(
-                        "album", a,
-                        tidalapi_session=self.session,
-                        rust_session=self._rust_session,
-                    )
+                    wrap_model("album", a, rust_session=self._rust_session)
                     for a in items
                 ]
             except RustTidalCoreError as e:
