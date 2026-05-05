@@ -18,9 +18,58 @@ from _rust.tidal import (
     get_rust_tidal_core,
     RustTidalCoreError,
     RustTidalCoreUnavailable,
+    wrap_model,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _RustSearchResults:
+    """Tidalapi-shaped search-result view backed by Rust JSON. Exposes
+    `.artists / .albums / .tracks / .videos / .playlists` as lists of
+    wrapped model objects so callers using the legacy attribute or dict
+    pattern keep working unchanged."""
+
+    __slots__ = ("_raw", "_tidalapi_session", "_cache")
+
+    def __init__(self, raw: dict, tidalapi_session) -> None:
+        self._raw = raw or {}
+        self._tidalapi_session = tidalapi_session
+        self._cache: dict = {}
+
+    def _wrap(self, key: str, kind: str):
+        if key in self._cache:
+            return self._cache[key]
+        items = [
+            wrap_model(kind, item, tidalapi_session=self._tidalapi_session)
+            for item in (self._raw.get(key) or [])
+        ]
+        self._cache[key] = items
+        return items
+
+    @property
+    def artists(self):
+        return self._wrap("artists", "artist")
+
+    @property
+    def albums(self):
+        return self._wrap("albums", "album")
+
+    @property
+    def tracks(self):
+        return self._wrap("tracks", "track")
+
+    @property
+    def videos(self):
+        return self._wrap("videos", "video")
+
+    @property
+    def playlists(self):
+        return self._wrap("playlists", "playlist")
+
+    def __getitem__(self, key):
+        # Some legacy code probes results as a dict.
+        return getattr(self, key)
 
 
 class TidalBackend:
@@ -471,6 +520,113 @@ class TidalBackend:
             except RustTidalCoreError as e:
                 logger.debug("rust check_login error [%s]: %s", e.kind, e)
         return self.session.check_login()
+
+    # ------------------------------------------------------------------
+    # Rust model fetchers (Phase 3). Each falls back to tidalapi if the
+    # Rust core is unavailable — Phase 7 deletes the fallback. The wrapped
+    # objects expose tidalapi-shaped attribute access (track.id, track.name,
+    # track.album.cover, ...) plus a lazy tidalapi proxy for methods Phase 3
+    # doesn't yet replace (track.lyrics, album.tracks, playlist.tracks, ...)
+    # so existing call chains keep working.
+    # ------------------------------------------------------------------
+
+    def _rust_track(self, track_id):
+        if self._rust_session is None:
+            return self.session.track(int(track_id))
+        try:
+            data = self._rust_session.fetch_track(int(track_id))
+        except RustTidalCoreError as e:
+            logger.debug("rust fetch_track(%s) error [%s]: %s", track_id, e.kind, e)
+            return self.session.track(int(track_id))
+        return wrap_model("track", data, tidalapi_session=self.session)
+
+    def _rust_album(self, album_id):
+        if self._rust_session is None:
+            return self.session.album(int(album_id))
+        try:
+            data = self._rust_session.fetch_album(int(album_id))
+        except RustTidalCoreError as e:
+            logger.debug("rust fetch_album(%s) error [%s]: %s", album_id, e.kind, e)
+            return self.session.album(int(album_id))
+        return wrap_model("album", data, tidalapi_session=self.session)
+
+    def _rust_artist(self, artist_or_id):
+        if hasattr(artist_or_id, "id") and not isinstance(artist_or_id, (int, str)):
+            artist_or_id = artist_or_id.id
+        try:
+            aid = int(artist_or_id)
+        except (TypeError, ValueError):
+            return self.session.artist(artist_or_id)
+        if self._rust_session is None:
+            return self.session.artist(aid)
+        try:
+            data = self._rust_session.fetch_artist(aid)
+        except RustTidalCoreError as e:
+            logger.debug("rust fetch_artist(%s) error [%s]: %s", aid, e.kind, e)
+            return self.session.artist(aid)
+        return wrap_model("artist", data, tidalapi_session=self.session)
+
+    def _rust_playlist(self, playlist_id):
+        pid = str(playlist_id or "").strip()
+        if not pid:
+            return None
+        if self._rust_session is None:
+            return self.session.playlist(pid)
+        try:
+            data = self._rust_session.fetch_playlist(pid)
+        except RustTidalCoreError as e:
+            logger.debug("rust fetch_playlist(%s) error [%s]: %s", pid, e.kind, e)
+            return self.session.playlist(pid)
+        return wrap_model("playlist", data, tidalapi_session=self.session)
+
+    def _rust_mix(self, mix_id):
+        mid = str(mix_id or "").strip()
+        if not mid:
+            return None
+        if self._rust_session is None:
+            return self.session.mix(mid)
+        try:
+            data = self._rust_session.fetch_mix(mid)
+        except RustTidalCoreError as e:
+            logger.debug("rust fetch_mix(%s) error [%s]: %s", mid, e.kind, e)
+            return self.session.mix(mid)
+        return wrap_model("mix", data, tidalapi_session=self.session)
+
+    def _rust_folder(self, folder_id):
+        fid = str(folder_id or "").strip()
+        if not fid:
+            return None
+        if self._rust_session is None:
+            return self.session.folder(fid)
+        try:
+            data = self._rust_session.fetch_folder(fid)
+        except RustTidalCoreError as e:
+            logger.debug("rust fetch_folder(%s) error [%s]: %s", fid, e.kind, e)
+            return self.session.folder(fid)
+        return wrap_model("folder", data, tidalapi_session=self.session)
+
+    def _rust_search(self, query, limit=50):
+        if self._rust_session is None:
+            return self.session.search(str(query), limit=int(limit))
+        try:
+            raw = self._rust_session.search(str(query), limit=int(limit))
+        except RustTidalCoreError as e:
+            logger.debug("rust search('%s') error [%s]: %s", query, e.kind, e)
+            return self.session.search(str(query), limit=int(limit))
+        return _RustSearchResults(raw, self.session)
+
+    def _rust_parse(self, kind, data):
+        kind = str(kind).lower()
+        if not isinstance(data, dict) or self._rust_session is None:
+            fallback = getattr(self.session, f"parse_{kind}", None)
+            return fallback(data) if callable(fallback) else None
+        try:
+            parsed = self._rust_core.parse_model(kind, data)
+        except RustTidalCoreError as e:
+            logger.debug("rust parse_%s error [%s]: %s", kind, e.kind, e)
+            fallback = getattr(self.session, f"parse_{kind}", None)
+            return fallback(data) if callable(fallback) else None
+        return wrap_model(kind, parsed, tidalapi_session=self.session)
 
     def _serialize_expiry(self, value):
         if hasattr(value, "isoformat"):
@@ -1250,7 +1406,7 @@ class TidalBackend:
         if not pid:
             return None
         try:
-            return self.session.playlist(pid)
+            return self._rust_playlist(pid)
         except Exception as e:
             logger.warning("Failed to resolve playlist %s: %s", pid, e)
             return None
@@ -1447,7 +1603,7 @@ class TidalBackend:
         folder = parent_folder
         if not hasattr(folder, "items"):
             try:
-                folder = self.session.folder(getattr(parent_folder, "id", parent_folder))
+                folder = self._rust_folder(getattr(parent_folder, "id", parent_folder))
             except Exception as e:
                 logger.warning("Failed resolving folder %s: %s", parent_folder, e)
                 return []
@@ -1489,7 +1645,7 @@ class TidalBackend:
             return urls
         if not hasattr(folder, "items"):
             try:
-                folder = self.session.folder(getattr(folder_or_id, "id", folder_or_id))
+                folder = self._rust_folder(getattr(folder_or_id, "id", folder_or_id))
             except Exception as e:
                 logger.debug("Failed to resolve folder for preview artwork %s: %s", folder_or_id, e)
                 return urls
@@ -1857,9 +2013,9 @@ class TidalBackend:
             # History/Local objects may only contain artist id/name and
             # do not expose get_albums(). Resolve to a real artist first.
             if isinstance(a, (int, str)):
-                a = self.session.artist(a)
+                a = self._rust_artist(a)
             elif hasattr(a, "id") and not hasattr(a, "get_albums"):
-                a = self.session.artist(getattr(a, "id"))
+                a = self._rust_artist(getattr(a, "id"))
             res = a.get_albums()
             return list((res() if callable(res) else res) or [])
         try:
@@ -1875,9 +2031,9 @@ class TidalBackend:
         def _fetch():
             a = art
             if isinstance(a, (int, str)):
-                a = self.session.artist(a)
+                a = self._rust_artist(a)
             elif hasattr(a, "id") and not hasattr(a, "get_top_tracks"):
-                a = self.session.artist(getattr(a, "id"))
+                a = self._rust_artist(getattr(a, "id"))
             fetcher = getattr(a, "get_top_tracks", None)
             if not callable(fetcher):
                 return []
@@ -1904,9 +2060,9 @@ class TidalBackend:
         def _fetch():
             a = art
             if isinstance(a, (int, str)):
-                a = self.session.artist(a)
+                a = self._rust_artist(a)
             elif hasattr(a, "id") and not hasattr(a, method_name):
-                a = self.session.artist(getattr(a, "id"))
+                a = self._rust_artist(getattr(a, "id"))
             fetcher = getattr(a, method_name, None)
             if not callable(fetcher):
                 return []
@@ -1958,9 +2114,9 @@ class TidalBackend:
         def _fetch():
             a = art
             if isinstance(a, (int, str)):
-                a = self.session.artist(a)
+                a = self._rust_artist(a)
             elif hasattr(a, "id") and not hasattr(a, "get_similar"):
-                a = self.session.artist(getattr(a, "id"))
+                a = self._rust_artist(getattr(a, "id"))
             return list(a.get_similar() or [])
         try:
             return list(self._call_with_session_recovery(_fetch, context="similar artists") or [])
@@ -1972,9 +2128,9 @@ class TidalBackend:
         try:
             artist_obj = art
             if isinstance(artist_obj, (int, str)):
-                artist_obj = self.session.artist(artist_obj)
+                artist_obj = self._rust_artist(artist_obj)
             elif hasattr(artist_obj, "id") and not hasattr(artist_obj, "get_ep_singles") and not hasattr(artist_obj, "get_albums_ep_singles"):
-                artist_obj = self.session.artist(getattr(artist_obj, "id"))
+                artist_obj = self._rust_artist(getattr(artist_obj, "id"))
 
             if callable(getattr(artist_obj, "get_ep_singles", None)):
                 return self._get_artist_album_collection(artist_obj, "get_ep_singles", limit=limit, page_size=100)
@@ -1988,9 +2144,9 @@ class TidalBackend:
         def _fetch():
             a = art
             if isinstance(a, (int, str)):
-                a = self.session.artist(a)
+                a = self._rust_artist(a)
             elif hasattr(a, "id") and not hasattr(a, "get_albums"):
-                a = self.session.artist(getattr(a, "id"))
+                a = self._rust_artist(getattr(a, "id"))
             res = a.get_albums(limit=limit, offset=offset)
             return list((res() if callable(res) else res) or [])
         try:
@@ -2006,7 +2162,7 @@ class TidalBackend:
         """
         if artist_id is not None:
             try:
-                return self.session.artist(artist_id)
+                return self._rust_artist(artist_id)
             except Exception as e:
                 logger.debug("Resolve artist by id failed for %s: %s", artist_id, e)
 
@@ -2057,20 +2213,18 @@ class TidalBackend:
 
         try:
             obj = None
-            if item_type == "ALBUM" and hasattr(self.session, "parse_album"):
-                obj = self.session.parse_album(data)
-            elif item_type == "ARTIST" and hasattr(self.session, "parse_artist"):
-                obj = self.session.parse_artist(data)
-            elif item_type == "TRACK" and hasattr(self.session, "parse_track"):
-                obj = self.session.parse_track(data)
-            elif item_type == "PLAYLIST" and hasattr(self.session, "parse_playlist"):
-                obj = self.session.parse_playlist(data)
-            elif item_type == "VIDEO" and hasattr(self.session, "parse_video"):
-                obj = self.session.parse_video(data)
+            if item_type == "ALBUM":
+                obj = self._rust_parse("album", data)
+            elif item_type == "ARTIST":
+                obj = self._rust_parse("artist", data)
+            elif item_type == "TRACK":
+                obj = self._rust_parse("track", data)
+            elif item_type == "PLAYLIST":
+                obj = self._rust_parse("playlist", data)
+            elif item_type == "VIDEO":
+                obj = self._rust_parse("video", data)
             elif item_type == "MIX":
-                mix_parser = getattr(self.session, "parse_v2_mix", None) or getattr(self.session, "parse_mix", None)
-                if callable(mix_parser):
-                    obj = mix_parser(data)
+                obj = self._rust_parse("mix", data)
             if obj is None:
                 return None
             processed = self._process_generic_item(obj)
@@ -3220,7 +3374,7 @@ class TidalBackend:
                             return []
 
                         def fetch_mix_items():
-                            mix = self.session.mix(item_id)
+                            mix = self._rust_mix(item_id)
                             return self._extract_tracks_from_items(mix.items())
 
                         try:
@@ -3235,11 +3389,11 @@ class TidalBackend:
                             raise
 
                     if 'Playlist' in item_type:
-                        pl = self.session.playlist(item_id)
+                        pl = self._rust_playlist(item_id)
                         return self._extract_tracks_from_items(pl.items())
 
                     if 'Album' in item_type:
-                        alb = self.session.album(item_id)
+                        alb = self._rust_album(item_id)
                         return alb.tracks()
 
                 # 3. 回退到对象自带方法（适配部分本地/轻量对象）。
@@ -3248,7 +3402,7 @@ class TidalBackend:
                 if hasattr(resolved, 'items') and callable(resolved.items):
                     return self._extract_tracks_from_items(resolved.items())
                 if hasattr(resolved, 'id'):
-                    return self.session.album(resolved.id).tracks()
+                    return self._rust_album(resolved.id).tracks()
                 return []
 
             return self._call_with_session_recovery(_fetch, context="album tracks")
@@ -3330,7 +3484,7 @@ class TidalBackend:
             pl_id = getattr(obj, "id", None)
             if pl_id:
                 try:
-                    full_pl = self.session.playlist(pl_id)
+                    full_pl = self._rust_playlist(pl_id)
                     scanned_full = self._scan_image_like_attrs(full_pl, size=size)
                     if scanned_full:
                         return scanned_full
@@ -3559,7 +3713,7 @@ class TidalBackend:
                 return None
             full_artist = None
             if artist_id:
-                full_artist = self.session.artist(artist_id)
+                full_artist = self._rust_artist(artist_id)
                 u = self.get_artwork_url(full_artist, size) or self._scan_image_like_attrs(full_artist, size)
                 if u and self._is_placeholder_artist_artwork_url(u):
                     logger.debug(
@@ -3688,7 +3842,7 @@ class TidalBackend:
             for idx, q in enumerate(qualities):
                 try:
                     self._apply_session_quality(q)
-                    full_track = self.session.track(track.id)
+                    full_track = self._rust_track(track.id)
 
                     # Prefer the newer playbackinfopostpaywall endpoint (get_stream).
                     # It supports HI_RES_LOSSLESS; the legacy urlpostpaywall endpoint
@@ -3802,7 +3956,7 @@ class TidalBackend:
                     track_name = str(getattr(track, "name", "") or "").strip().lower()
                     if album_id and track_name:
                         try:
-                            album = self.session.album(album_id)
+                            album = self._rust_album(album_id)
                             album_tracks = album.tracks()
                             alt_track = next(
                                 (
@@ -3862,9 +4016,7 @@ class TidalBackend:
 
     def search_artist(self, query):
         try:
-            # Some tidalapi versions do not expose tidalapi.models.
-            # Use generic search and extract artists in a compatible way.
-            res = self.session.search(query, limit=20)
+            res = self._rust_search(query, limit=20)
             artists = getattr(res, "artists", None)
             if artists is None and isinstance(res, dict):
                 artists = res.get("artists")
@@ -3898,7 +4050,7 @@ class TidalBackend:
             return {'artists': [], 'albums': [], 'tracks': []}
 
         try:
-            res = self.session.search(query, limit=300)
+            res = self._rust_search(query, limit=300)
             logger.debug("Raw search response type: %s", type(res))
             results = self._parse_search_results(res, limit_per_type=6)
             logger.info(
@@ -3927,7 +4079,7 @@ class TidalBackend:
             return self.lyrics_cache.get(track_id)
 
         try:
-            lyrics_obj = self.session.track(track_id).lyrics()
+            lyrics_obj = self._rust_track(track_id).lyrics()
 
             if not lyrics_obj:
                 logger.debug("Lyrics result: none (no lyrics object found)")

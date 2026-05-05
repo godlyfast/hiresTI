@@ -112,6 +112,33 @@ class _RustTidalCore:
             lib.rtc_session_request.restype = ctypes.c_void_p
             lib.rtc_session_request.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 
+            lib.rtc_session_fetch_track.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_track.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+
+            lib.rtc_session_fetch_album.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_album.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+
+            lib.rtc_session_fetch_artist.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_artist.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+
+            lib.rtc_session_fetch_playlist.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_playlist.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
+            lib.rtc_session_fetch_mix.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_mix.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
+            lib.rtc_session_fetch_folder.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_folder.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
+            lib.rtc_session_search.restype = ctypes.c_void_p
+            lib.rtc_session_search.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+
+            lib.rtc_session_page_get_raw.restype = ctypes.c_void_p
+            lib.rtc_session_page_get_raw.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
+            lib.rtc_parse_model.restype = ctypes.c_void_p
+            lib.rtc_parse_model.argtypes = [ctypes.c_char_p]
+
             lib.rtc_token_read_file.restype = ctypes.c_void_p
             lib.rtc_token_read_file.argtypes = [ctypes.c_char_p]
 
@@ -167,6 +194,13 @@ class _RustTidalCore:
         return self._take_json(
             lib.rtc_echo_json(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         )
+
+    def parse_model(self, kind: str, value: Any) -> dict:
+        """Run a raw TIDAL JSON dict through one of the named model parsers.
+        Returns the parsed model JSON (or raises RustTidalCoreError)."""
+        lib = self._require_lib()
+        body = json.dumps({"kind": str(kind), "value": value}, ensure_ascii=False).encode("utf-8")
+        return self._result_or_raise(lib.rtc_parse_model(body))
 
     # ------------------------------------------------------------------ files
     def token_read_file(self, path: str | Path) -> dict:
@@ -276,6 +310,48 @@ class RustTidalSession:
         """Returns the new PersistedToken JSON."""
         return self._call_session("rtc_session_refresh_token")
 
+    # ---------------------------------------------------------------- models
+    def fetch_track(self, track_id: int) -> dict:
+        lib = self._core._require_lib()
+        return self._core._result_or_raise(
+            lib.rtc_session_fetch_track(self._handle, ctypes.c_int64(int(track_id)))
+        )
+
+    def fetch_album(self, album_id: int) -> dict:
+        lib = self._core._require_lib()
+        return self._core._result_or_raise(
+            lib.rtc_session_fetch_album(self._handle, ctypes.c_int64(int(album_id)))
+        )
+
+    def fetch_artist(self, artist_id: int) -> dict:
+        lib = self._core._require_lib()
+        return self._core._result_or_raise(
+            lib.rtc_session_fetch_artist(self._handle, ctypes.c_int64(int(artist_id)))
+        )
+
+    def fetch_playlist(self, playlist_id: str) -> dict:
+        return self._call_session_with_str("rtc_session_fetch_playlist", str(playlist_id))
+
+    def fetch_mix(self, mix_id: str) -> dict:
+        return self._call_session_with_str("rtc_session_fetch_mix", str(mix_id))
+
+    def fetch_folder(self, folder_id: str) -> dict:
+        return self._call_session_with_str("rtc_session_fetch_folder", str(folder_id))
+
+    def search(self, query: str, limit: int = 50) -> dict:
+        lib = self._core._require_lib()
+        return self._core._result_or_raise(
+            lib.rtc_session_search(
+                self._handle, str(query).encode("utf-8"), int(max(1, min(300, limit)))
+            )
+        )
+
+    def page_get_raw(self, path: str, params: Optional[dict] = None) -> dict:
+        return self._call_session_with_json(
+            "rtc_session_page_get_raw",
+            {"path": str(path), "params": _scrub_params(params)},
+        )
+
     def request(
         self,
         method: str,
@@ -312,6 +388,180 @@ def _scrub_params(params: Optional[dict]) -> Optional[dict]:
             continue
         out[str(k)] = v
     return out or None
+
+
+# ---------------------------------------------------------------------------
+# Hybrid model wrappers (Phase 3)
+# ---------------------------------------------------------------------------
+#
+# Each Rust-fetched model is presented to backend/tidal.py as an object with
+# attribute access matching the tidalapi shape callers already use:
+#   track.id, track.name, track.duration, track.album.cover, ...
+#
+# Method calls (.tracks(), .items(), .add(), .delete(), .lyrics(),
+# .get_stream()) are not yet implemented in Rust — those land in Phase 4-6.
+# Until then the wrapper lazily delegates them to a tidalapi proxy
+# constructed on demand. That bridge disappears in Phase 7.
+
+
+class _NestedRef:
+    """Read-only attribute view over a nested dict (e.g. track.album.cover)."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: dict) -> None:
+        self._data = data or {}
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._data:
+            v = self._data[name]
+            if isinstance(v, dict):
+                return _NestedRef(v)
+            return v
+        raise AttributeError(name)
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __repr__(self) -> str:
+        return f"_NestedRef({sorted(self._data)})"
+
+    def to_dict(self) -> dict:
+        return dict(self._data)
+
+
+class _RustModelBase:
+    """Base for hybrid Rust+tidalapi models. Subclasses set
+    `_tidalapi_factory` (a callable taking `tidalapi_session` -> proxy) so
+    method calls fall through to tidalapi until Phase 4+ replace them."""
+
+    _tidalapi_factory = None  # type: Any
+
+    def __init__(self, data: dict, tidalapi_session=None) -> None:
+        object.__setattr__(self, "_data", dict(data or {}))
+        object.__setattr__(self, "_tidalapi_session", tidalapi_session)
+        object.__setattr__(self, "_tidalapi_proxy", None)
+
+    def __getattr__(self, name: str) -> Any:
+        # Rust-known fields take priority. Nested dicts wrap as _NestedRef so
+        # `track.album.cover` keeps working.
+        data = self.__dict__.get("_data") or {}
+        if name in data:
+            v = data[name]
+            if isinstance(v, dict):
+                return _NestedRef(v)
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                return [_NestedRef(item) for item in v]
+            return v
+        # Fall through to a lazily-fetched tidalapi proxy for methods the
+        # Rust core doesn't yet expose (.tracks(), .items(), .add(), ...).
+        proxy = self._ensure_proxy()
+        if proxy is None:
+            raise AttributeError(
+                f"{type(self).__name__} has no attribute {name!r} "
+                f"(rust fields: {sorted(data)})"
+            )
+        return getattr(proxy, name)
+
+    def _ensure_proxy(self):
+        proxy = self.__dict__.get("_tidalapi_proxy")
+        if proxy is not None:
+            return proxy
+        factory = type(self)._tidalapi_factory
+        session = self.__dict__.get("_tidalapi_session")
+        if not factory or session is None:
+            return None
+        try:
+            proxy = factory(session, self.__dict__["_data"])
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "tidalapi proxy construction failed for %s: %s",
+                type(self).__name__,
+                e,
+            )
+            return None
+        object.__setattr__(self, "_tidalapi_proxy", proxy)
+        return proxy
+
+    def to_dict(self) -> dict:
+        return dict(self._data)
+
+    def __repr__(self) -> str:
+        d = self.__dict__.get("_data") or {}
+        return f"{type(self).__name__}(id={d.get('id')!r}, name={d.get('name') or d.get('title')!r})"
+
+
+def _make_track_proxy(session, data):
+    return session.track(data["id"]) if data.get("id") else None
+
+
+def _make_album_proxy(session, data):
+    return session.album(data["id"]) if data.get("id") else None
+
+
+def _make_artist_proxy(session, data):
+    return session.artist(data["id"]) if data.get("id") else None
+
+
+def _make_playlist_proxy(session, data):
+    return session.playlist(data["id"]) if data.get("id") else None
+
+
+def _make_mix_proxy(session, data):
+    return session.mix(data["id"]) if data.get("id") else None
+
+
+def _make_folder_proxy(session, data):
+    fn = getattr(session, "folder", None)
+    if fn is None:
+        return None
+    return fn(data["id"]) if data.get("id") else None
+
+
+class RustTrack(_RustModelBase):
+    _tidalapi_factory = staticmethod(_make_track_proxy)
+
+
+class RustAlbum(_RustModelBase):
+    _tidalapi_factory = staticmethod(_make_album_proxy)
+
+
+class RustArtist(_RustModelBase):
+    _tidalapi_factory = staticmethod(_make_artist_proxy)
+
+
+class RustPlaylist(_RustModelBase):
+    _tidalapi_factory = staticmethod(_make_playlist_proxy)
+
+
+class RustMix(_RustModelBase):
+    _tidalapi_factory = staticmethod(_make_mix_proxy)
+
+
+class RustFolder(_RustModelBase):
+    _tidalapi_factory = staticmethod(_make_folder_proxy)
+
+
+class RustVideo(_RustModelBase):
+    _tidalapi_factory = None
+
+
+def wrap_model(kind: str, data: dict, tidalapi_session=None):
+    cls = {
+        "track": RustTrack,
+        "album": RustAlbum,
+        "artist": RustArtist,
+        "playlist": RustPlaylist,
+        "mix": RustMix,
+        "folder": RustFolder,
+        "video": RustVideo,
+    }.get(str(kind).lower())
+    if cls is None:
+        return data
+    return cls(data, tidalapi_session=tidalapi_session)
 
 
 _singleton: Optional[_RustTidalCore] = None

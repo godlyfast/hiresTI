@@ -7,8 +7,10 @@
 // already understands.
 
 mod auth;
+mod endpoints;
 mod error;
 mod http;
+mod models;
 mod request;
 mod session;
 
@@ -271,6 +273,136 @@ pub unsafe extern "C" fn rtc_session_oauth_device_poll(handle_ptr: *mut Session)
             Some(user) => Ok(json!({"status": "ok", "user": user})),
             None => Ok(json!({"status": "pending"})),
         }
+    })();
+    handle(result)
+}
+
+// ---------------------------------------------------------------------------
+// Model fetchers (Phase 3)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_track(
+    handle_ptr: *mut Session,
+    track_id: i64,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        Ok(serde_json::to_value(session.fetch_track(track_id)?)?)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_album(
+    handle_ptr: *mut Session,
+    album_id: i64,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        Ok(serde_json::to_value(session.fetch_album(album_id)?)?)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_artist(
+    handle_ptr: *mut Session,
+    artist_id: i64,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        Ok(serde_json::to_value(session.fetch_artist(artist_id)?)?)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_playlist(
+    handle_ptr: *mut Session,
+    playlist_id: *const c_char,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let id = cstr_or_invalid(playlist_id, "playlist_id")?;
+        Ok(serde_json::to_value(session.fetch_playlist(id)?)?)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_mix(
+    handle_ptr: *mut Session,
+    mix_id: *const c_char,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let id = cstr_or_invalid(mix_id, "mix_id")?;
+        Ok(serde_json::to_value(session.fetch_mix(id)?)?)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_folder(
+    handle_ptr: *mut Session,
+    folder_id: *const c_char,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let id = cstr_or_invalid(folder_id, "folder_id")?;
+        Ok(serde_json::to_value(session.fetch_folder(id)?)?)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_search(
+    handle_ptr: *mut Session,
+    query: *const c_char,
+    limit: c_int,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let q = cstr_or_invalid(query, "query")?;
+        Ok(serde_json::to_value(session.search(q, limit as i32)?)?)
+    })();
+    handle(result)
+}
+
+/// `args_json`: `{"path": "pages/genre_page", "params": {"deviceType": "BROWSER"}}`
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_page_get_raw(
+    handle_ptr: *mut Session,
+    args_json: *const c_char,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct PageArgs {
+        path: String,
+        #[serde(default)]
+        params: Option<std::collections::BTreeMap<String, crate::request::ParamValue>>,
+    }
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let args: PageArgs = parse_json_input(args_json, "args_json")?;
+        session.page_get_raw(&args.path, args.params)
+    })();
+    handle(result)
+}
+
+/// Parse a model dict using one of the named parsers. `args_json`:
+/// `{"kind": "track" | "album" | ..., "value": {...}}`. Returns the parsed
+/// model JSON.
+#[no_mangle]
+pub unsafe extern "C" fn rtc_parse_model(args_json: *const c_char) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct ParseArgs {
+        kind: String,
+        value: serde_json::Value,
+    }
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let args: ParseArgs = parse_json_input(args_json, "args_json")?;
+        crate::endpoints::parse_typed(&args.kind, &args.value)
     })();
     handle(result)
 }

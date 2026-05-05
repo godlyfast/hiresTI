@@ -11,7 +11,9 @@ use crate::auth::{
 };
 use crate::error::{RtcError, RtcResult};
 use crate::http::{build_agent, json_body, ok_response};
-use crate::request::{perform_request, RequestArgs, ResponseJson};
+use crate::endpoints;
+use crate::models::{Album, Artist, Folder, Mix, Playlist, SearchResults, Track};
+use crate::request::{perform_request, ParamValue, RequestArgs, ResponseJson};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
@@ -207,6 +209,35 @@ impl Session {
             session_id.as_deref(),
             args,
         )
+    }
+
+    pub fn fetch_track(&self, id: i64) -> RtcResult<Track> {
+        endpoints::fetch_track(self, id)
+    }
+    pub fn fetch_album(&self, id: i64) -> RtcResult<Album> {
+        endpoints::fetch_album(self, id)
+    }
+    pub fn fetch_artist(&self, id: i64) -> RtcResult<Artist> {
+        endpoints::fetch_artist(self, id)
+    }
+    pub fn fetch_playlist(&self, id: &str) -> RtcResult<Playlist> {
+        endpoints::fetch_playlist(self, id)
+    }
+    pub fn fetch_mix(&self, id: &str) -> RtcResult<Mix> {
+        endpoints::fetch_mix(self, id)
+    }
+    pub fn fetch_folder(&self, id: &str) -> RtcResult<Folder> {
+        endpoints::fetch_folder(self, id)
+    }
+    pub fn search(&self, query: &str, limit: i32) -> RtcResult<SearchResults> {
+        endpoints::search(self, query, limit)
+    }
+    pub fn page_get_raw(
+        &self,
+        path: &str,
+        extra_params: Option<std::collections::BTreeMap<String, ParamValue>>,
+    ) -> RtcResult<serde_json::Value> {
+        endpoints::page_get_raw(self, path, extra_params)
     }
 
     pub fn refresh_token(&self) -> RtcResult<TokenInfo> {
