@@ -115,7 +115,6 @@ class TidalBackend:
         self._migrate_token_from_cache()
         self.user = None
         self.quality = self._get_best_quality()
-        self._apply_global_config()
         # Rust auth core is authoritative starting Phase 1: it owns the
         # PKCE / OAuth flows and the on-disk token file. The tidalapi
         # `self.session` is mirrored from the Rust state on every auth
@@ -286,71 +285,39 @@ class TidalBackend:
         except Exception as e:
             logger.debug("Failed tuning tidalapi HTTP pool: %s", e)
 
+    # TIDAL audioQuality canonical strings (what the playback endpoint expects).
+    _QUALITY_ALIASES = {
+        # tidalapi Quality enum lower-case attribute names.
+        "hi_res_lossless": "HI_RES_LOSSLESS",
+        "high_lossless": "LOSSLESS",
+        "low_320k": "HIGH",
+        "low_96k": "LOW",
+        # Legacy name retained by old config files.
+        "MASTER": "HI_RES",
+    }
+
     def _resolve_quality(self, candidates, fallback="LOSSLESS"):
-        """
-        Resolve quality across different tidalapi enum shapes:
-        - new enum names: hi_res_lossless / high_lossless / low_320k ...
-        - legacy names: HI_RES / LOSSLESS / HIGH ...
-        """
-        quality_enum = getattr(tidalapi, "Quality", None)
-        cand_list = [str(c).strip() for c in list(candidates or []) if str(c).strip()]
-        if quality_enum is not None:
-            # 1) Match enum attribute name directly.
-            for name in cand_list:
-                if hasattr(quality_enum, name):
-                    val = getattr(quality_enum, name)
-                    if not callable(val):
-                        return val
-
-            # 2) Match enum member value string.
-            try:
-                members = list(quality_enum)  # enum iteration
-            except Exception:
-                members = []
-            for name in cand_list:
-                upper_name = name.upper()
-                for m in members:
-                    m_val = str(getattr(m, "value", m) or "")
-                    if m_val.upper() == upper_name:
-                        return m
-
-        # 3) Fallback to first provided string.
-        return cand_list[0] if cand_list else fallback
+        """Pick the first valid TIDAL audioQuality string from `candidates`,
+        normalizing tidalapi-enum names ("hi_res_lossless") and legacy aliases
+        ("MASTER") into the canonical uppercase form."""
+        valid = {"LOW", "HIGH", "LOSSLESS", "HI_RES", "HI_RES_LOSSLESS"}
+        for raw in candidates or []:
+            name = str(raw or "").strip()
+            if not name:
+                continue
+            mapped = self._QUALITY_ALIASES.get(name) or self._QUALITY_ALIASES.get(name.lower())
+            if mapped:
+                return mapped
+            up = name.upper()
+            if up in valid:
+                return up
+        return fallback
 
     def _get_best_quality(self):
         return self._resolve_quality(
-            [
-                "hi_res_lossless",
-                "HI_RES_LOSSLESS",
-                "HI_RES",
-                "MASTER",
-                "high_lossless",
-                "LOSSLESS",
-                "low_320k",
-                "HIGH",
-            ],
+            ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS", "HIGH"],
             fallback="LOSSLESS",
         )
-
-    def _apply_global_config(self, session_obj=None):
-        try:
-            target_session = self.session if session_obj is None else session_obj
-            if hasattr(target_session, 'config'):
-                target_session.config.quality = self.quality
-                if hasattr(target_session.config, 'set_quality'):
-                    target_session.config.set_quality(self.quality)
-        except Exception as e:
-            logger.warning("Config sync warning: %s", e)
-
-    def _apply_session_quality(self, quality, session_obj=None):
-        try:
-            target_session = self.session if session_obj is None else session_obj
-            if hasattr(target_session, "config"):
-                target_session.config.quality = quality
-                if hasattr(target_session.config, "set_quality"):
-                    target_session.config.set_quality(quality)
-        except Exception as e:
-            logger.debug("Failed to apply session quality %s: %s", quality, e)
 
     def _get_stream_quality_fallback_chain(self):
         """
@@ -396,7 +363,6 @@ class TidalBackend:
         self._normalize_tls_ca_env()
         self._set_last_login_error("")
         self.session = tidalapi.Session()
-        self._apply_global_config()
 
         if self._rust_session is None:
             raise RuntimeError(
@@ -497,7 +463,6 @@ class TidalBackend:
         self._normalize_tls_ca_env()
         self._set_last_login_error("")
         self.session = tidalapi.Session()
-        self._apply_global_config()
         if self._rust_session is None:
             raise RuntimeError(
                 "rust_tidal_core is unavailable — build src_rust/rust_tidal_core (cargo build --release)."
@@ -547,7 +512,6 @@ class TidalBackend:
         self._tune_http_pool()
         self.save_session()
         self.refresh_favorite_ids()
-        self._apply_global_config()
         self._set_last_login_error("")
         return True
 
@@ -750,7 +714,6 @@ class TidalBackend:
         call; that's intentional — Rust already validated the token, we want
         tidalapi's User factory cache populated for downstream consumers."""
         new_session = tidalapi.Session()
-        self._apply_global_config(session_obj=new_session)
         ok = new_session.load_oauth_session(
             persisted.get('token_type'),
             persisted.get('access_token'),
@@ -785,7 +748,6 @@ class TidalBackend:
             self.session = tidalapi_session
             self.user = tidalapi_session.user
             self._tune_http_pool()
-            self._apply_global_config()
             self._set_last_login_error("")
             try:
                 self.save_session()
@@ -3857,157 +3819,152 @@ class TidalBackend:
         downgrade_url = None
         downgrade_info = None
         downgrade_q = None
-        try:
-            for idx, q in enumerate(qualities):
+        for idx, q in enumerate(qualities):
+            try:
+                full_track = self._rust_track(track.id)
+
+                # Prefer the newer playbackinfopostpaywall endpoint (get_stream).
+                # It supports HI_RES_LOSSLESS; the legacy urlpostpaywall endpoint
+                # caps at LOSSLESS regardless of subscription.
+                url = None
+                stream_info = None
                 try:
-                    self._apply_session_quality(q)
-                    full_track = self._rust_track(track.id)
-
-                    # Prefer the newer playbackinfopostpaywall endpoint (get_stream).
-                    # It supports HI_RES_LOSSLESS; the legacy urlpostpaywall endpoint
-                    # caps at LOSSLESS regardless of subscription.
-                    url = None
-                    stream_info = None
-                    try:
-                        url, stream_info = self._get_url_from_stream(full_track, q)
-                    except Exception as stream_exc:
-                        logger.debug(
-                            "get_stream() path failed (%s), falling back to get_url(): %s",
-                            type(stream_exc).__name__,
-                            stream_exc,
-                        )
-                        url = self._fetch_legacy_url(int(track.id), q, full_track)
-
-                    # Cache source format from TIDAL API for the player to inject
-                    # into stream_info (TAG events don't carry Hz/-bit info).
-                    self._last_stream_bit_depth = int(
-                        getattr(stream_info, "bit_depth", 0) or 0
+                    url, stream_info = self._get_url_from_stream(full_track, q)
+                except Exception as stream_exc:
+                    logger.debug(
+                        "get_stream() path failed (%s), falling back to get_url(): %s",
+                        type(stream_exc).__name__,
+                        stream_exc,
                     )
-                    self._last_stream_sample_rate = int(
-                        getattr(stream_info, "sample_rate", 0) or 0
-                    )
+                    url = self._fetch_legacy_url(int(track.id), q, full_track)
 
-                    # Codec validation: when we asked for a LOSSLESS-tier stream
-                    # but Tidal returned a non-LOSSLESS audio_quality (HIGH/LOW
-                    # = AAC), save it as a fallback and try the next chain entry.
-                    # Recovers FLAC for tracks that have a hi-res master in the
-                    # catalog but whose LOSSLESS tier is being downgraded.
-                    asked_lossless = "LOSSLESS" in str(q or "").upper()
-                    returned_q_str = str(getattr(stream_info, "audio_quality", "") or "").upper()
-                    got_lossless = "LOSSLESS" in returned_q_str
-                    if asked_lossless and stream_info is not None and not got_lossless:
-                        if downgrade_url is None:
-                            downgrade_url = url
-                            downgrade_info = stream_info
-                            downgrade_q = q
-                        if idx < len(qualities) - 1:
-                            logger.warning(
-                                "Tidal downgraded '%s' to %s on q=%s; trying next fallback...",
-                                getattr(track, "name", "?"),
-                                returned_q_str or "?",
-                                q,
-                            )
-                            continue
-
-                    if idx == 0:
-                        if stream_info is not None:
-                            logger.info(
-                                "Stream resolved for '%s': quality=%s %sbit/%sHz",
-                                getattr(track, "name", "?"),
-                                getattr(stream_info, "audio_quality", q),
-                                getattr(stream_info, "bit_depth", "?"),
-                                getattr(stream_info, "sample_rate", "?"),
-                            )
-                        else:
-                            logger.info(
-                                "Stream URL resolved for '%s' with quality %s",
-                                getattr(track, "name", "?"),
-                                q,
-                            )
-                    else:
-                        logger.warning(
-                            "Stream quality fallback for '%s': preferred=%s actual=%s %sbit/%sHz",
-                            getattr(track, "name", "unknown"),
-                            preferred,
-                            q,
-                            getattr(stream_info, "bit_depth", "?") if stream_info else "?",
-                            getattr(stream_info, "sample_rate", "?") if stream_info else "?",
-                        )
-                    return url
-                except Exception as e:
-                    last_exc = e
-                    kind = classify_exception(e)
-                    # Keep trying lower tiers for auth/availability rejections.
-                    if idx < len(qualities) - 1 and kind in ("auth", "server", "unknown"):
-                        logger.warning(
-                            "Stream URL failed at quality %s [%s], trying fallback...",
-                            q,
-                            kind,
-                        )
-                        continue
-                    if idx < len(qualities) - 1:
-                        continue
-            # Every chain entry that succeeded returned a downgraded AAC stream
-            # (track has no FLAC master in Tidal's catalog).  Use the first
-            # such URL as last-resort output rather than failing the call.
-            if downgrade_url is not None:
+                # Cache source format from TIDAL API for the player to inject
+                # into stream_info (TAG events don't carry Hz/-bit info).
                 self._last_stream_bit_depth = int(
-                    getattr(downgrade_info, "bit_depth", 0) or 0
+                    getattr(stream_info, "bit_depth", 0) or 0
                 )
                 self._last_stream_sample_rate = int(
-                    getattr(downgrade_info, "sample_rate", 0) or 0
+                    getattr(stream_info, "sample_rate", 0) or 0
                 )
-                logger.warning(
-                    "Stream lossless unavailable for '%s'; using downgraded %s (q=%s)",
-                    getattr(track, "name", "?"),
-                    getattr(downgrade_info, "audio_quality", "?"),
-                    downgrade_q,
-                )
-                return downgrade_url
-            if last_exc is not None:
-                logger.warning("Stream URL error [%s]: %s", classify_exception(last_exc), last_exc)
-                # When a track ID is dead (404/not_found) — common for liked songs that
-                # reference old catalog IDs that were later replaced — try to recover the
-                # correct track by looking it up through its album.  This is exactly what
-                # users do manually when they "find the song in its album and play it".
-                if classify_exception(last_exc) == "not_found":
-                    album_id = getattr(getattr(track, "album", None), "id", None)
-                    track_name = str(getattr(track, "name", "") or "").strip().lower()
-                    if album_id and track_name:
-                        try:
-                            album = self._rust_album(album_id)
-                            album_tracks = album.tracks()
-                            alt_track = next(
-                                (
-                                    t for t in (album_tracks or [])
-                                    if str(getattr(t, "name", "") or "").strip().lower() == track_name
-                                    and getattr(t, "id", None) != getattr(track, "id", None)
-                                ),
-                                None,
-                            )
-                            if alt_track is not None:
-                                logger.warning(
-                                    "Stream URL album fallback: stale_id=%s → album_id=%s alt_id=%s name=%r",
-                                    getattr(track, "id", None),
-                                    album_id,
-                                    alt_track.id,
-                                    getattr(track, "name", ""),
-                                )
-                                self._last_track_redirect = (
-                                    str(getattr(track, "id", "") or ""),
-                                    alt_track,
-                                )
-                                return self.get_stream_url(alt_track)
-                        except Exception as fb_exc:
-                            logger.debug(
-                                "Album fallback for track %s failed: %s",
+
+                # Codec validation: when we asked for a LOSSLESS-tier stream
+                # but Tidal returned a non-LOSSLESS audio_quality (HIGH/LOW
+                # = AAC), save it as a fallback and try the next chain entry.
+                # Recovers FLAC for tracks that have a hi-res master in the
+                # catalog but whose LOSSLESS tier is being downgraded.
+                asked_lossless = "LOSSLESS" in str(q or "").upper()
+                returned_q_str = str(getattr(stream_info, "audio_quality", "") or "").upper()
+                got_lossless = "LOSSLESS" in returned_q_str
+                if asked_lossless and stream_info is not None and not got_lossless:
+                    if downgrade_url is None:
+                        downgrade_url = url
+                        downgrade_info = stream_info
+                        downgrade_q = q
+                    if idx < len(qualities) - 1:
+                        logger.warning(
+                            "Tidal downgraded '%s' to %s on q=%s; trying next fallback...",
+                            getattr(track, "name", "?"),
+                            returned_q_str or "?",
+                            q,
+                        )
+                        continue
+
+                if idx == 0:
+                    if stream_info is not None:
+                        logger.info(
+                            "Stream resolved for '%s': quality=%s %sbit/%sHz",
+                            getattr(track, "name", "?"),
+                            getattr(stream_info, "audio_quality", q),
+                            getattr(stream_info, "bit_depth", "?"),
+                            getattr(stream_info, "sample_rate", "?"),
+                        )
+                    else:
+                        logger.info(
+                            "Stream URL resolved for '%s' with quality %s",
+                            getattr(track, "name", "?"),
+                            q,
+                        )
+                else:
+                    logger.warning(
+                        "Stream quality fallback for '%s': preferred=%s actual=%s %sbit/%sHz",
+                        getattr(track, "name", "unknown"),
+                        preferred,
+                        q,
+                        getattr(stream_info, "bit_depth", "?") if stream_info else "?",
+                        getattr(stream_info, "sample_rate", "?") if stream_info else "?",
+                    )
+                return url
+            except Exception as e:
+                last_exc = e
+                kind = classify_exception(e)
+                # Keep trying lower tiers for auth/availability rejections.
+                if idx < len(qualities) - 1 and kind in ("auth", "server", "unknown"):
+                    logger.warning(
+                        "Stream URL failed at quality %s [%s], trying fallback...",
+                        q,
+                        kind,
+                    )
+                    continue
+                if idx < len(qualities) - 1:
+                    continue
+        # Every chain entry that succeeded returned a downgraded AAC stream
+        # (track has no FLAC master in Tidal's catalog).  Use the first
+        # such URL as last-resort output rather than failing the call.
+        if downgrade_url is not None:
+            self._last_stream_bit_depth = int(
+                getattr(downgrade_info, "bit_depth", 0) or 0
+            )
+            self._last_stream_sample_rate = int(
+                getattr(downgrade_info, "sample_rate", 0) or 0
+            )
+            logger.warning(
+                "Stream lossless unavailable for '%s'; using downgraded %s (q=%s)",
+                getattr(track, "name", "?"),
+                getattr(downgrade_info, "audio_quality", "?"),
+                downgrade_q,
+            )
+            return downgrade_url
+        if last_exc is not None:
+            logger.warning("Stream URL error [%s]: %s", classify_exception(last_exc), last_exc)
+            # When a track ID is dead (404/not_found) — common for liked songs that
+            # reference old catalog IDs that were later replaced — try to recover the
+            # correct track by looking it up through its album.  This is exactly what
+            # users do manually when they "find the song in its album and play it".
+            if classify_exception(last_exc) == "not_found":
+                album_id = getattr(getattr(track, "album", None), "id", None)
+                track_name = str(getattr(track, "name", "") or "").strip().lower()
+                if album_id and track_name:
+                    try:
+                        album = self._rust_album(album_id)
+                        album_tracks = album.tracks()
+                        alt_track = next(
+                            (
+                                t for t in (album_tracks or [])
+                                if str(getattr(t, "name", "") or "").strip().lower() == track_name
+                                and getattr(t, "id", None) != getattr(track, "id", None)
+                            ),
+                            None,
+                        )
+                        if alt_track is not None:
+                            logger.warning(
+                                "Stream URL album fallback: stale_id=%s → album_id=%s alt_id=%s name=%r",
                                 getattr(track, "id", None),
-                                fb_exc,
+                                album_id,
+                                alt_track.id,
+                                getattr(track, "name", ""),
                             )
-            return None
-        finally:
-            # Restore selected preference for subsequent requests.
-            self._apply_session_quality(preferred)
+                            self._last_track_redirect = (
+                                str(getattr(track, "id", "") or ""),
+                                alt_track,
+                            )
+                            return self.get_stream_url(alt_track)
+                    except Exception as fb_exc:
+                        logger.debug(
+                            "Album fallback for track %s failed: %s",
+                            getattr(track, "id", None),
+                            fb_exc,
+                        )
+        return None
 
     def set_quality_mode(self, mode_str):
         mapping = {
@@ -4031,7 +3988,6 @@ class TidalBackend:
         target_keys = mapping.get(mode_str, ["low_320k", "HIGH"])
         self.quality = self._resolve_quality(target_keys, fallback="LOSSLESS")
         logger.info("Quality mode set: %s -> %s", mode_str, self.quality)
-        self._apply_global_config()
 
     def search_artist(self, query):
         try:
@@ -4162,4 +4118,3 @@ class TidalBackend:
         self.fav_track_ids = set()
         self._cached_albums = []
         self._cached_albums_ts = 0.0
-        self._apply_global_config()
