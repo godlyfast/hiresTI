@@ -1,5 +1,4 @@
 import tidalapi
-import tidalapi.user as tidal_user
 import concurrent.futures
 import logging
 import os
@@ -1037,129 +1036,26 @@ class TidalBackend:
             logger.warning("Failed to toggle track favorite for %s (add=%s): %s", track_id, add, e)
             return False
 
-    def _paginate_favorites_api(self, api_callable, limit=1000, page_size=100, count_callable=None):
-        if not callable(api_callable):
-            return []
-
-        target = max(0, int(limit or 0))
-        if target <= 0:
-            return []
-
-        if callable(count_callable):
-            try:
-                total = max(0, int(count_callable() or 0))
-            except Exception as e:
-                logger.debug("Failed to fetch favorites count: %s", e)
-            else:
-                if total > 0:
-                    target = min(target, total)
-                    if target <= 0:
-                        return []
-
-        def _normalize(seq):
-            if isinstance(seq, list):
-                return seq
-            return list(seq or [])
-
-        def _fetch_page(offset, size):
-            call_specs = (
-                {"limit": size, "offset": offset},
-                {"offset": offset, "limit": size},
-                {"limit": size},
-                {},
-            )
-            for kwargs in call_specs:
-                try:
-                    res = api_callable(**kwargs) if kwargs else api_callable()
-                except TypeError:
-                    continue
-                page = res() if callable(res) else res
-                return _normalize(page), kwargs
-            res = api_callable()
-            page = res() if callable(res) else res
-            return _normalize(page), {}
-
-        size = min(max(1, int(page_size or 100)), max(1, target))
-        merged = []
-        seen = set()
-        offset = 0
-
-        while len(merged) < target:
-            page, used_kwargs = _fetch_page(offset, size)
-            if not page:
-                break
-
-            new_added = 0
-            for item in page:
-                iid = getattr(item, "id", None)
-                key = f"id:{iid}" if iid is not None else f"obj:{id(item)}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(item)
-                new_added += 1
-                if len(merged) >= target:
-                    break
-
-            if "offset" not in used_kwargs or new_added == 0:
-                break
-
-            offset += len(page)
-            if offset > 100000:
-                break
-
-        return merged[:target]
-
-    def _fetch_favorites_collection(
-        self,
-        fav,
-        *,
-        paginated_attr,
-        api_attr,
-        count_attr=None,
-        limit=1000,
-        page_size=100,
-    ):
-        target = max(0, int(limit or 0))
-        if fav is None or target <= 0:
-            return []
-
-        paginated_api = getattr(fav, paginated_attr, None)
-        if callable(paginated_api):
-            try:
-                items = paginated_api()
-                items = items() if callable(items) else items
-                return list(items or [])[:target]
-            except Exception as e:
-                logger.debug(
-                    "Failed to fetch %s via paginated API; falling back to manual pagination: %s",
-                    paginated_attr,
-                    e,
-                )
-
-        api_callable = getattr(fav, api_attr, None)
-        count_callable = getattr(fav, count_attr, None) if count_attr else None
-        return self._paginate_favorites_api(
-            api_callable,
-            limit=target,
-            page_size=page_size,
-            count_callable=count_callable,
-        )
-
     def get_favorites(self, limit=20000):
-        try: 
+        try:
             def _fetch():
-                if not self.user:
+                if not self.user or self._rust_session is None:
                     return []
-                fav = getattr(self.user, "favorites", None)
-                return self._fetch_favorites_collection(
-                    fav,
-                    paginated_attr="artists_paginated",
-                    api_attr="artists",
-                    count_attr="get_artists_count",
-                    limit=limit,
-                    page_size=100,
-                )
+                from _rust.tidal import _drain_pages
+                try:
+                    items = _drain_pages(
+                        self._rust_session,
+                        "favorite_artists",
+                        page_size=100,
+                    )
+                except RustTidalCoreError as e:
+                    logger.debug("rust favorite_artists drain error [%s]: %s", e.kind, e)
+                    return []
+                target = max(0, int(limit or 0)) or None
+                return [
+                    wrap_model("artist", a, rust_session=self._rust_session)
+                    for a in (items or [])[:target]
+                ]
 
             return self._call_with_session_recovery(_fetch, context="favorite artists")
         except Exception as e:
@@ -1220,41 +1116,9 @@ class TidalBackend:
                 return list(self._call_with_session_recovery(_fetch, context="favorite artists page") or [])
             except RustTidalCoreError as e:
                 logger.debug("rust favorite_artists page error [%s]: %s", e.kind, e)
+                return []
 
-        # Fallback: tidalapi enum-based path.
-        try:
-            tidal_order = getattr(tidal_user.ArtistOrder, "Name" if order == "NAME" else "DateAdded", None)
-            tidal_dir = getattr(
-                tidal_user.OrderDirection,
-                "Ascending" if direction == "ASC" else "Descending",
-                None,
-            )
-
-            def _fetch():
-                if not self.user:
-                    return []
-                fav = getattr(self.user, "favorites", None)
-                artists_api = getattr(fav, "artists", None)
-                if not callable(artists_api):
-                    return []
-                kwargs = {"limit": page_size, "offset": page_offset}
-                if tidal_order is not None:
-                    kwargs["order"] = tidal_order
-                if tidal_dir is not None:
-                    kwargs["order_direction"] = tidal_dir
-                res = artists_api(**kwargs)
-                return list((res() if callable(res) else res) or [])
-
-            return list(self._call_with_session_recovery(_fetch, context="favorite artists page") or [])
-        except Exception as e:
-            logger.warning(
-                "Failed to fetch favorite artists page offset=%s limit=%s sort=%s: %s",
-                page_offset,
-                page_size,
-                sort,
-                e,
-            )
-            return []
+        return []
 
     def get_recent_albums(self, limit=20000):
         try:
@@ -1269,22 +1133,13 @@ class TidalBackend:
                             "favorite_albums",
                             page_size=1000,
                         )
-                        if items is not None:
-                            return [
-                                wrap_model("album", a, rust_session=self._rust_session)
-                                for a in items[: int(limit or 0)]
-                            ]
+                        return [
+                            wrap_model("album", a, rust_session=self._rust_session)
+                            for a in (items or [])[: int(limit or 0)]
+                        ]
                     except RustTidalCoreError as e:
                         logger.debug("rust favorite_albums drain error [%s]: %s", e.kind, e)
-                fav = getattr(self.user, "favorites", None)
-                return self._fetch_favorites_collection(
-                    fav,
-                    paginated_attr="albums_paginated",
-                    api_attr="albums",
-                    count_attr="get_albums_count",
-                    limit=limit,
-                    page_size=1000,
-                )
+                return []
 
             result = self._call_with_session_recovery(_fetch, context="recent albums")
             # Populate cache and fav_album_ids so callers can avoid re-fetching.
@@ -1356,30 +1211,6 @@ class TidalBackend:
         date-added DESC order.
         """
         sort_key = str(sort or "recent").strip().lower()
-        # Map UI sort modes to tidalapi ItemOrder/OrderDirection.  Anything
-        # unknown falls back to date-DESC (matches the UI's "recent" sort).
-        order_obj = None
-        order_direction = None
-        try:
-            if sort_key == "title":
-                order_obj = getattr(tidal_user.ItemOrder, "Name", None)
-                order_direction = getattr(tidal_user.OrderDirection, "Ascending", None)
-            elif sort_key == "artist":
-                order_obj = getattr(tidal_user.ItemOrder, "Artist", None)
-                order_direction = getattr(tidal_user.OrderDirection, "Ascending", None)
-            elif sort_key == "album":
-                order_obj = getattr(tidal_user.ItemOrder, "Album", None)
-                order_direction = getattr(tidal_user.OrderDirection, "Ascending", None)
-            elif sort_key == "duration":
-                order_obj = getattr(tidal_user.ItemOrder, "Length", None)
-                order_direction = getattr(tidal_user.OrderDirection, "Ascending", None)
-            else:
-                order_obj = getattr(tidal_user.ItemOrder, "Date", None)
-                order_direction = getattr(tidal_user.OrderDirection, "Descending", None)
-        except Exception:
-            order_obj = None
-            order_direction = None
-
         # Map UI sort keys to TIDAL order/orderDirection strings for Rust.
         order_str = "DATE"
         direction_str = "DESC"
@@ -1394,96 +1225,28 @@ class TidalBackend:
 
         try:
             def _fetch():
-                if not self.user:
+                if not self.user or self._rust_session is None:
                     return []
                 target = max(0, int(limit or 0))
                 if target <= 0:
                     return []
 
-                # Phase 4 fast path: Rust drives the pagination loop.
-                if self._rust_session is not None:
-                    try:
-                        from _rust.tidal import _drain_pages
-                        items = _drain_pages(
-                            self._rust_session,
-                            "favorite_tracks",
-                            page_size=1000,
-                            order=order_str,
-                            order_direction=direction_str,
-                        )
-                        if items is not None:
-                            wrapped = [
-                                wrap_model("track", t, rust_session=self._rust_session)
-                                for t in items[:target]
-                            ]
-                            if wrapped:
-                                return wrapped
-                    except RustTidalCoreError as e:
-                        logger.debug("rust favorite_tracks drain error [%s]: %s", e.kind, e)
-
-                fav = getattr(self.user, "favorites", None)
-                if fav is None:
+                from _rust.tidal import _drain_pages
+                try:
+                    items = _drain_pages(
+                        self._rust_session,
+                        "favorite_tracks",
+                        page_size=1000,
+                        order=order_str,
+                        order_direction=direction_str,
+                    )
+                except RustTidalCoreError as e:
+                    logger.debug("rust favorite_tracks drain error [%s]: %s", e.kind, e)
                     return []
-
-                # Prefer the manual `tracks(limit, offset, order, order_direction)`
-                # path so the upstream sort is honored.  Fall back to the
-                # generic `_fetch_favorites_collection` (tracks_paginated)
-                # when the manual API isn't usable on this tidalapi version.
-                tracks_api = getattr(fav, "tracks", None)
-                if callable(tracks_api) and order_obj is not None:
-                    page_size = min(1000, max(1, target))
-                    merged = []
-                    seen = set()
-                    offset = 0
-                    while len(merged) < target:
-                        kwargs = {
-                            "limit": page_size,
-                            "offset": offset,
-                            "order": order_obj,
-                            "order_direction": order_direction,
-                        }
-                        try:
-                            res = tracks_api(**kwargs)
-                        except TypeError:
-                            # Older tidalapi: try without order kwargs and
-                            # fall back to the generic helper at the end.
-                            merged = []
-                            break
-                        page = list((res() if callable(res) else res) or [])
-                        if not page:
-                            break
-                        new_in_page = 0
-                        for t in page:
-                            tid = str(getattr(t, "id", "") or "")
-                            if tid and tid in seen:
-                                continue
-                            if tid:
-                                seen.add(tid)
-                            merged.append(t)
-                            new_in_page += 1
-                            if len(merged) >= target:
-                                break
-                        if new_in_page == 0:
-                            logger.warning(
-                                "Favorite tracks pagination stalled at offset=%d (page=%d, no new ids); stopping.",
-                                offset,
-                                len(page),
-                            )
-                            break
-                        if len(page) < page_size:
-                            break
-                        offset += len(page)
-                    if merged:
-                        return merged[:target]
-
-                return self._fetch_favorites_collection(
-                    fav,
-                    paginated_attr="tracks_paginated",
-                    api_attr="tracks",
-                    count_attr="get_tracks_count",
-                    limit=target,
-                    page_size=1000,
-                )
+                return [
+                    wrap_model("track", t, rust_session=self._rust_session)
+                    for t in (items or [])[:target]
+                ]
 
             return self._call_with_session_recovery(_fetch, context="favorite tracks")
         except Exception as e:
