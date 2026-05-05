@@ -322,16 +322,68 @@ pub fn parse_playlist(value: &Value) -> Playlist {
 
 pub fn parse_mix(value: &Value) -> Mix {
     let id = parse_str(value, "id").unwrap_or_default();
-    let title = parse_str(value, "title").unwrap_or_default();
-    let sub_title = parse_str(value, "subTitle").or_else(|| parse_str(value, "sub_title"));
+    // TIDAL home/feed/static (v2) returns mixes in TWO shapes depending on
+    // the surface:
+    //   shape A — has `mixType`: {title, subTitle, images: {SMALL/MEDIUM/LARGE: {url}}}
+    //   shape B — has `type` only: {titleTextInfo.text, subtitleTextInfo.text,
+    //                                mixImages: [{url}, {url}, {url}]}
+    // tidalapi.MixV2.parse handles both — we mirror that here so home cards
+    // don't render as "Unknown" with placeholder art when the feed sends
+    // shape B.
+    let title = parse_str(value, "title")
+        .or_else(|| pick_text_info(value.get("titleTextInfo")))
+        .unwrap_or_default();
+    let sub_title = parse_str(value, "subTitle")
+        .or_else(|| parse_str(value, "sub_title"))
+        .or_else(|| pick_text_info(value.get("subtitleTextInfo")))
+        .or_else(|| pick_text_info(value.get("subTitleTextInfo")));
+    let image = parse_str(value, "image")
+        .or_else(|| pick_sized_image_url(value.get("images")))
+        .or_else(|| pick_array_image_url(value.get("mixImages")))
+        .or_else(|| parse_str(value, "imageUrl"));
+    let detail_image = parse_str(value, "detailImage")
+        .or_else(|| pick_sized_image_url(value.get("detailImages")))
+        .or_else(|| pick_array_image_url(value.get("detailMixImages")));
     Mix {
         id,
         title,
         sub_title,
         mix_type: parse_str(value, "mixType"),
-        image: parse_str(value, "image"),
-        detail_image: parse_str(value, "detailImage"),
+        image,
+        detail_image,
     }
+}
+
+fn pick_sized_image_url(value: Option<&Value>) -> Option<String> {
+    let v = value?;
+    for size in ["LARGE", "MEDIUM", "SMALL"] {
+        if let Some(url) = v
+            .get(size)
+            .and_then(|sized| sized.get("url"))
+            .and_then(|u| u.as_str())
+        {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
+fn pick_array_image_url(value: Option<&Value>) -> Option<String> {
+    let arr = value?.as_array()?;
+    // Prefer the largest image (last entry in TIDAL's array form, by convention).
+    for item in arr.iter().rev() {
+        if let Some(url) = item.get("url").and_then(|u| u.as_str()) {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
+fn pick_text_info(value: Option<&Value>) -> Option<String> {
+    value?
+        .get("text")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
 }
 
 pub fn parse_folder(value: &Value) -> Folder {

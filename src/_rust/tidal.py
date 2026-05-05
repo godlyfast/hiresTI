@@ -485,6 +485,9 @@ def _scrub_params(params: Optional[dict]) -> Optional[dict]:
 # constructed on demand. That bridge disappears in Phase 7.
 
 
+_PROXY_FAILED = object()  # sentinel: tidalapi proxy construction has failed for this wrapper
+
+
 class _NestedRef:
     """Read-only attribute view over a nested dict (e.g. track.album.cover)."""
 
@@ -520,6 +523,21 @@ class _RustModelBase:
     method calls fall through to tidalapi until Phase 4+ replace them."""
 
     _tidalapi_factory = None  # type: Any
+    # Cheap aliases for fields whose name differs between Rust JSON and
+    # tidalapi/TIDAL upstream naming. Hits here avoid building a tidalapi
+    # proxy (which would round-trip GET albums/{id} just to read .title).
+    # Bidirectional: Album/Track/Artist/Playlist use `name`, Mix uses
+    # `title` — code that probes either should land on whichever the
+    # underlying model stores.
+    _FIELD_ALIASES = {"title": "name", "name": "title"}
+    # Explicit allowlist of attribute names that should fall through to
+    # the tidalapi proxy. Constructing the proxy fires an HTTP fetch
+    # (tidalapi.Album/Track/Artist all GET on __init__), so any unknown
+    # attribute we DON'T list here will raise AttributeError instead of
+    # silently spending a network round-trip — important because
+    # get_artwork_url and similar code paths probe ~12 attribute names
+    # per item, which used to cost ~12 HTTP fetches per home-page card.
+    _PROXY_METHODS: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -534,41 +552,57 @@ class _RustModelBase:
 
     def __getattr__(self, name: str) -> Any:
         # Rust-known fields take priority. Nested dicts wrap as _NestedRef so
-        # `track.album.cover` keeps working.
+        # `track.album.cover` keeps working. Direct hit wins; otherwise try
+        # the bidirectional alias (so name↔title works whichever side a
+        # given model stores).
         data = self.__dict__.get("_data") or {}
-        if name in data:
-            v = data[name]
-            if isinstance(v, dict):
-                return _NestedRef(v)
-            if isinstance(v, list) and v and isinstance(v[0], dict):
-                return [_NestedRef(item) for item in v]
-            return v
-        # Fall through to a lazily-fetched tidalapi proxy for methods the
-        # Rust core doesn't yet expose (.tracks(), .items(), .add(), ...).
-        proxy = self._ensure_proxy()
-        if proxy is None:
-            raise AttributeError(
-                f"{type(self).__name__} has no attribute {name!r} "
-                f"(rust fields: {sorted(data)})"
-            )
-        return getattr(proxy, name)
+        for key in (name, self._FIELD_ALIASES.get(name)):
+            if key is not None and key in data:
+                v = data[key]
+                if isinstance(v, dict):
+                    return _NestedRef(v)
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    return [_NestedRef(item) for item in v]
+                return v
+        # Only known proxy methods fall through. Arbitrary attribute reads
+        # that happen to miss our Rust data (cover_url, picture, image,
+        # description, ...) raise AttributeError instead of triggering an
+        # HTTP fetch.
+        if name in self._PROXY_METHODS:
+            proxy = self._ensure_proxy()
+            if proxy is not None:
+                return getattr(proxy, name)
+        raise AttributeError(
+            f"{type(self).__name__} has no attribute {name!r} "
+            f"(rust fields: {sorted(data)})"
+        )
 
     def _ensure_proxy(self):
         proxy = self.__dict__.get("_tidalapi_proxy")
+        if proxy is _PROXY_FAILED:
+            return None
         if proxy is not None:
             return proxy
         factory = type(self)._tidalapi_factory
         session = self.__dict__.get("_tidalapi_session")
         if not factory or session is None:
+            object.__setattr__(self, "_tidalapi_proxy", _PROXY_FAILED)
             return None
         try:
             proxy = factory(session, self.__dict__["_data"])
         except Exception as e:  # noqa: BLE001
+            # Cache the failure: tidalapi factories that raise (e.g.
+            # session.album(id) → ObjectNotFound for a dead catalog entry)
+            # will keep raising. Without this sentinel, every attribute
+            # miss on the wrapper re-fires the same HTTP 404 — get_artwork_url
+            # alone probes ~12 missing attrs and amplifies one dead ID into
+            # a 12x request storm.
             logger.debug(
                 "tidalapi proxy construction failed for %s: %s",
                 type(self).__name__,
                 e,
             )
+            object.__setattr__(self, "_tidalapi_proxy", _PROXY_FAILED)
             return None
         object.__setattr__(self, "_tidalapi_proxy", proxy)
         return proxy
@@ -645,10 +679,16 @@ def _drain_pages(rust_session, kind: str, *, page_size: int = 100, **list_kwargs
 
 class RustTrack(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_track_proxy)
+    # Stream / lyrics are still served via tidalapi until Phase 5/6.
+    _PROXY_METHODS = frozenset({
+        "get_url", "get_stream", "get_stream_manifest", "get_manifest_data",
+        "lyrics",
+    })
 
 
 class RustAlbum(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_album_proxy)
+    _PROXY_METHODS = frozenset()
 
     def tracks(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
@@ -687,10 +727,12 @@ class RustAlbum(_RustModelBase):
 
 class RustArtist(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_artist_proxy)
+    _PROXY_METHODS = frozenset()
 
 
 class RustPlaylist(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_playlist_proxy)
+    _PROXY_METHODS = frozenset()
 
     def tracks(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")
@@ -768,6 +810,7 @@ class RustPlaylist(_RustModelBase):
 
 class RustMix(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_mix_proxy)
+    _PROXY_METHODS = frozenset()
 
     def items(self, limit: Optional[int] = None, offset: int = 0):
         rust_session = self.__dict__.get("_rust_session")

@@ -141,6 +141,13 @@ class TidalBackend:
         # Set to (old_id_str, alt_track) when album fallback succeeds in get_stream_url.
         # Consumed by the app layer to update liked_tracks_data / fav_track_ids.
         self._last_track_redirect = None
+        # 404 short-circuit: when an ID is gone from TIDAL's catalog, asking
+        # tidalapi after Rust already 404'd just doubles the noise. We cache
+        # these IDs per-session so repeated lookups (e.g. 12 stale liked
+        # tracks pointing at the same dead album in the stream-URL fallback)
+        # don't each fire two 404s.
+        self._dead_album_ids: set[int] = set()
+        self._dead_track_ids: set[int] = set()
 
     def _default_ca_bundle_candidates(self):
         candidates = [
@@ -537,23 +544,37 @@ class TidalBackend:
     # ------------------------------------------------------------------
 
     def _rust_track(self, track_id):
+        tid = int(track_id)
+        if tid in self._dead_track_ids:
+            raise RustTidalCoreError({"kind": "not_found", "status": 404,
+                                      "error": f"track {tid} cached as 404"})
         if self._rust_session is None:
-            return self.session.track(int(track_id))
+            return self.session.track(tid)
         try:
-            data = self._rust_session.fetch_track(int(track_id))
+            data = self._rust_session.fetch_track(tid)
         except RustTidalCoreError as e:
+            if e.kind == "not_found":
+                self._dead_track_ids.add(tid)
+                raise
             logger.debug("rust fetch_track(%s) error [%s]: %s", track_id, e.kind, e)
-            return self.session.track(int(track_id))
+            return self.session.track(tid)
         return wrap_model("track", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_album(self, album_id):
+        aid = int(album_id)
+        if aid in self._dead_album_ids:
+            raise RustTidalCoreError({"kind": "not_found", "status": 404,
+                                      "error": f"album {aid} cached as 404"})
         if self._rust_session is None:
-            return self.session.album(int(album_id))
+            return self.session.album(aid)
         try:
-            data = self._rust_session.fetch_album(int(album_id))
+            data = self._rust_session.fetch_album(aid)
         except RustTidalCoreError as e:
+            if e.kind == "not_found":
+                self._dead_album_ids.add(aid)
+                raise
             logger.debug("rust fetch_album(%s) error [%s]: %s", album_id, e.kind, e)
-            return self.session.album(int(album_id))
+            return self.session.album(aid)
         return wrap_model("album", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_artist(self, artist_or_id):
