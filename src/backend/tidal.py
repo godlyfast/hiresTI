@@ -129,11 +129,12 @@ class TidalBackend:
                     pool_size=int(os.getenv("HIRESTI_HTTP_POOL_SIZE", "64") or 64)
                 )
             except RustTidalCoreError as e:
-                logger.warning("rust_tidal_core session init failed: %s", e)
+                logger.error("rust_tidal_core session init failed: %s", e)
         else:
-            logger.warning(
-                "rust_tidal_core .so not loaded — auth/persistence will fall back to "
-                "tidalapi until the crate is built (cargo build --release)."
+            logger.error(
+                "rust_tidal_core .so not loaded — playback/login/library "
+                "browsing will not function. Build the crate with "
+                "`cargo build --release` inside src_rust/rust_tidal_core/."
             )
         self.fav_album_ids = set()
         self.fav_artist_ids = set()
@@ -516,49 +517,56 @@ class TidalBackend:
         return True
 
     def check_login(self):
-        if self._rust_session is not None:
-            try:
-                return self._rust_session.check_login()
-            except RustTidalCoreError as e:
-                logger.debug("rust check_login error [%s]: %s", e.kind, e)
-        return self.session.check_login()
+        if self._rust_session is None:
+            return False
+        try:
+            return self._rust_session.check_login()
+        except RustTidalCoreError as e:
+            logger.debug("rust check_login error [%s]: %s", e.kind, e)
+            return False
 
     # ------------------------------------------------------------------
-    # Rust model fetchers. Authoritative path; the only tidalapi fallback
-    # left is the cold-start (.so failed to load) case. Wrapped objects
-    # expose tidalapi-shaped attribute access (track.id, track.name,
-    # track.album.cover, ...) backed entirely by the Rust JSON.
+    # Rust model fetchers. Rust core is the authoritative (and only) path:
+    # cold-start without the .so raises RustTidalCoreUnavailable rather
+    # than silently degrading to tidalapi objects, which had a different
+    # attribute shape than RustTrack/RustAlbum/... and silently broke
+    # downstream code expecting wrap_model behavior.
     # ------------------------------------------------------------------
+
+    def _require_rust_session(self) -> "RustTidalSession":
+        if self._rust_session is None:
+            raise RustTidalCoreUnavailable(
+                "rust_tidal_core .so not loaded — model fetcher unavailable"
+            )
+        return self._rust_session
 
     def _rust_track(self, track_id):
         tid = int(track_id)
         if tid in self._dead_track_ids:
             raise RustTidalCoreError({"kind": "not_found", "status": 404,
                                       "error": f"track {tid} cached as 404"})
-        if self._rust_session is None:
-            return self.session.track(tid)
+        rust = self._require_rust_session()
         try:
-            data = self._rust_session.fetch_track(tid)
+            data = rust.fetch_track(tid)
         except RustTidalCoreError as e:
             if e.kind == "not_found":
                 self._dead_track_ids.add(tid)
             raise
-        return wrap_model("track", data, rust_session=self._rust_session)
+        return wrap_model("track", data, rust_session=rust)
 
     def _rust_album(self, album_id):
         aid = int(album_id)
         if aid in self._dead_album_ids:
             raise RustTidalCoreError({"kind": "not_found", "status": 404,
                                       "error": f"album {aid} cached as 404"})
-        if self._rust_session is None:
-            return self.session.album(aid)
+        rust = self._require_rust_session()
         try:
-            data = self._rust_session.fetch_album(aid)
+            data = rust.fetch_album(aid)
         except RustTidalCoreError as e:
             if e.kind == "not_found":
                 self._dead_album_ids.add(aid)
             raise
-        return wrap_model("album", data, rust_session=self._rust_session)
+        return wrap_model("album", data, rust_session=rust)
 
     def _rust_artist(self, artist_or_id):
         if hasattr(artist_or_id, "id") and not isinstance(artist_or_id, (int, str)):
@@ -566,69 +574,55 @@ class TidalBackend:
         try:
             aid = int(artist_or_id)
         except (TypeError, ValueError):
-            return self.session.artist(artist_or_id)
-        if self._rust_session is None:
-            return self.session.artist(aid)
-        data = self._rust_session.fetch_artist(aid)
-        return wrap_model("artist", data, rust_session=self._rust_session)
+            return None
+        rust = self._require_rust_session()
+        data = rust.fetch_artist(aid)
+        return wrap_model("artist", data, rust_session=rust)
 
     def _rust_playlist(self, playlist_id):
         pid = str(playlist_id or "").strip()
         if not pid:
             return None
-        if self._rust_session is None:
-            return self.session.playlist(pid)
-        data = self._rust_session.fetch_playlist(pid)
-        return wrap_model("playlist", data, rust_session=self._rust_session)
+        rust = self._require_rust_session()
+        data = rust.fetch_playlist(pid)
+        return wrap_model("playlist", data, rust_session=rust)
 
     def _rust_mix(self, mix_id):
         mid = str(mix_id or "").strip()
         if not mid:
             return None
-        if self._rust_session is None:
-            return self.session.mix(mid)
-        data = self._rust_session.fetch_mix(mid)
-        return wrap_model("mix", data, rust_session=self._rust_session)
+        rust = self._require_rust_session()
+        data = rust.fetch_mix(mid)
+        return wrap_model("mix", data, rust_session=rust)
 
     def _rust_folder(self, folder_id):
         fid = str(folder_id or "").strip()
         if not fid:
             return None
-        if self._rust_session is None:
-            return self.session.folder(fid)
-        data = self._rust_session.fetch_folder(fid)
-        return wrap_model("folder", data, rust_session=self._rust_session)
+        rust = self._require_rust_session()
+        data = rust.fetch_folder(fid)
+        return wrap_model("folder", data, rust_session=rust)
 
     def _rust_search(self, query, limit=50):
-        if self._rust_session is None:
-            return self.session.search(str(query), limit=int(limit))
-        raw = self._rust_session.search(str(query), limit=int(limit))
-        return _RustSearchResults(raw, rust_session=self._rust_session)
+        rust = self._require_rust_session()
+        raw = rust.search(str(query), limit=int(limit))
+        return _RustSearchResults(raw, rust_session=rust)
 
     def _rust_parse(self, kind, data):
-        kind = str(kind).lower()
-        if not isinstance(data, dict) or self._rust_session is None:
-            fallback = getattr(self.session, f"parse_{kind}", None)
-            return fallback(data) if callable(fallback) else None
-        parsed = self._rust_core.parse_model(kind, data)
-        return wrap_model(kind, parsed, rust_session=self._rust_session)
+        if not isinstance(data, dict):
+            return None
+        rust = self._require_rust_session()
+        parsed = self._rust_core.parse_model(str(kind).lower(), data)
+        return wrap_model(kind, parsed, rust_session=rust)
 
     def _rust_page_get(self, path, params=None):
         """Authoritative /pages/* fetch. Returns a _PageView with the same
         attribute surface tidalapi.Page exposed (categories / title /
-        category.items / category._more). Cold-start falls back to
-        self.session.page.get() so users without the .so still see something."""
+        category.items / category._more). Returns None when the Rust core
+        isn't available — callers treat that as 'no page content'."""
         if self._rust_session is None:
-            sess_page = getattr(self.session, "page", None) if self.session else None
-            if sess_page is None:
-                return None
-            return sess_page.get(path, params=dict(params) if params else None)
+            return None
         return self._rust_session.page_get(path, params=params)
-
-    def _serialize_expiry(self, value):
-        if hasattr(value, "isoformat"):
-            return value.isoformat()
-        return value
 
     def _deserialize_expiry(self, value):
         if isinstance(value, str):
@@ -657,31 +651,17 @@ class TidalBackend:
         # + the same JSON schema previous versions wrote, so existing
         # ~/.config/hiresti/hiresti_token.json files keep loading) and is the
         # source of truth for the in-memory token state too.
-        persisted = None
-        if self._rust_session is not None:
-            try:
-                persisted = self._rust_session.persisted_snapshot()
-            except RustTidalCoreError as e:
-                logger.warning("rust persisted_snapshot failed [%s]: %s", e.kind, e)
+        if self._rust_session is None:
+            logger.debug("save_session: rust core unavailable; skipping persist.")
+            return
+        try:
+            persisted = self._rust_session.persisted_snapshot()
+        except RustTidalCoreError as e:
+            logger.warning("rust persisted_snapshot failed [%s]: %s", e.kind, e)
+            return
         if not persisted:
-            # Cold-start fallback (no rust core / not yet logged in via Rust):
-            # mirror tidalapi state into the same on-disk shape.
-            persisted = {
-                'token_type': self.session.token_type,
-                'access_token': self.session.access_token,
-                'refresh_token': self.session.refresh_token,
-                'expiry_time': self._serialize_expiry(self.session.expiry_time),
-                'is_pkce': bool(getattr(self.session, 'is_pkce', False)),
-            }
-        if self._rust_core.available:
-            self._rust_core.token_write_file(self.token_file, persisted)
-        else:
-            os.makedirs(os.path.dirname(self.token_file), exist_ok=True)
-            temp_file = f"{self.token_file}.tmp"
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(persisted, f)
-            os.replace(temp_file, self.token_file)
-            os.chmod(self.token_file, 0o600)
+            return
+        self._rust_core.token_write_file(self.token_file, persisted)
         logger.debug("Session saved to %s", self.token_file)
 
     def _read_saved_session_data(self):
@@ -692,15 +672,14 @@ class TidalBackend:
         if not os.path.exists(self.token_file):
             return None
 
-        if self._rust_core.available:
-            try:
-                data = self._rust_core.token_read_file(self.token_file)
-            except RustTidalCoreError as e:
-                logger.warning("Session file unreadable [%s]: %s", e.kind, e)
-                return None
-        else:
-            with open(self.token_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+        if not self._rust_core.available:
+            logger.error("rust core unavailable — cannot read saved session.")
+            return None
+        try:
+            data = self._rust_core.token_read_file(self.token_file)
+        except RustTidalCoreError as e:
+            logger.warning("Session file unreadable [%s]: %s", e.kind, e)
+            return None
 
         required = ('token_type', 'access_token', 'refresh_token')
         if not all(data.get(k) for k in required):
@@ -4019,8 +3998,8 @@ class TidalBackend:
 
     def search_items(self, query):
         logger.info("Starting search for query: '%s'", query)
-        
-        if not self.session.check_login():
+
+        if not self.check_login():
             logger.warning("Session expired or not logged in during search.")
             return {'artists': [], 'albums': [], 'tracks': []}
 
