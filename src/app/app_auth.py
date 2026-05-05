@@ -917,7 +917,6 @@ def _on_login_failed_for_attempt(self, attempt_id, message):
 
 def on_login_success(self):
     logger.info("Login successful.")
-    self.backend._tune_http_pool()
     self._apply_account_scope(force=True)
     self.show_output_notice("Login successful.", "ok", 2000)
     self._toggle_login_view(True)

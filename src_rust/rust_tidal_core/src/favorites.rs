@@ -322,11 +322,12 @@ pub fn list_favorite_tracks(session: &Session, args: &ListArgs) -> RtcResult<Pag
 }
 
 pub fn list_favorite_mixes(session: &Session, args: &ListArgs) -> RtcResult<PageResponse<Mix>> {
-    let uid = user_id_required(session)?;
+    // v2 surface: https://api.tidal.com/v2/favorites/mixes (no userId path).
+    // The v1 /users/{uid}/favorites/mixes path 404s.
     fetch_paginated(
         session,
-        &format!("users/{}/favorites/mixes", uid),
-        None,
+        "favorites/mixes",
+        Some(V2_BASE),
         args,
         None,
         parse_mix,
