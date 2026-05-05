@@ -2573,47 +2573,14 @@ class TidalBackend:
                     if context_header:
                         section["context_header"] = context_header
                     home_sections.append(section)
-            elif hasattr(self.session, 'home'):
-                logger.debug("Fetching session.home()...")
-                home = self.session.home()
-                if hasattr(home, 'categories'):
-                    for category in home.categories:
-                        title = str(getattr(category, "title", "") or "").strip()
-                        subtitle = self._get_home_section_subtitle(category)
-                        description = str(getattr(category, "description", "") or "").strip()
-                        filter_text = " ".join(
-                            part for part in (title, subtitle, description)
-                            if str(part or "").strip()
-                        ).lower()
-                        
-                        # [过滤逻辑] 检查标题是否包含任一关键词
-                        is_allowed = any(k in filter_text for k in ALLOWED_KEYWORDS)
-                        
-                        if is_allowed:
-                            section = {
-                                'title': title,
-                                'subtitle': subtitle,
-                                'section_type': str(getattr(category, "type", "") or ""),
-                                'items': []
-                            }
-                            if hasattr(category, 'items'):
-                                for item in category.items:
-                                    processed_item = self._process_generic_item(item)
-                                    if processed_item:
-                                        section['items'].append(processed_item)
-                            
-                            if section['items']:
-                                home_sections.append(section)
-                        else:
-                            # 可以在这里打印被过滤掉的栏目，方便调试
-                            # print(f"[Backend] Filtered out: {title}")
-                            pass
             else:
-                # 回退模式
-                logger.info("session.home() not found, using fallback.")
+                # Rust returned an empty home/feed/static payload — degrade
+                # gracefully to a "for-you mixes" stub.
+                logger.info("home/feed/static returned no items, using mixes fallback.")
                 mixes = self._get_fallback_mixes()
-                if mixes: home_sections.append({'title': 'Mixes for you', 'items': mixes})
-                
+                if mixes:
+                    home_sections.append({'title': 'Mixes for you', 'items': mixes})
+
         except Exception as e:
             logger.warning("Get home page error [%s]: %s", classify_exception(e), e)
             
