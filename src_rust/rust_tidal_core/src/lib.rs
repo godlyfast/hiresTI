@@ -15,6 +15,7 @@ mod lists;
 mod models;
 mod request;
 mod session;
+mod stream;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -586,6 +587,65 @@ pub unsafe extern "C" fn rtc_session_request(
         let args: crate::request::RequestArgs = parse_json_input(args_json, "args_json")?;
         let resp = session.request(args)?;
         Ok(serde_json::to_value(resp)?)
+    })();
+    handle(result)
+}
+
+// ---------------------------------------------------------------------------
+// Stream + manifest (Phase 5)
+// ---------------------------------------------------------------------------
+
+/// Fetch + decode the modern playbackinfopostpaywall envelope.
+/// `args_json`: `{"track_id": 12345, "audio_quality": "HI_RES_LOSSLESS",
+///                "playback_mode": "STREAM", "asset_presentation": "FULL"}`.
+/// Returns a fully-decoded StreamInfo (manifest already base64-decoded;
+/// BTS payload's inner JSON expanded into urls/codecs/etc).
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_stream(
+    handle_ptr: *mut Session,
+    args_json: *const c_char,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct StreamArgs {
+        track_id: i64,
+        audio_quality: String,
+        #[serde(default)]
+        playback_mode: Option<String>,
+        #[serde(default)]
+        asset_presentation: Option<String>,
+    }
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let args: StreamArgs = parse_json_input(args_json, "args_json")?;
+        let info = session.fetch_stream(
+            args.track_id,
+            &args.audio_quality,
+            args.playback_mode.as_deref(),
+            args.asset_presentation.as_deref(),
+        )?;
+        Ok(serde_json::to_value(info)?)
+    })();
+    handle(result)
+}
+
+/// Legacy `urlpostpaywall` fallback. `args_json`:
+/// `{"track_id": 12345, "audio_quality": "LOSSLESS"}`. Returns
+/// `{"url": "https://..."}`.
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_fetch_legacy_url(
+    handle_ptr: *mut Session,
+    args_json: *const c_char,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct LegacyArgs {
+        track_id: i64,
+        audio_quality: String,
+    }
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let args: LegacyArgs = parse_json_input(args_json, "args_json")?;
+        let url = session.fetch_legacy_url(args.track_id, &args.audio_quality)?;
+        Ok(json!({ "url": url }))
     })();
     handle(result)
 }

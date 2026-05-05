@@ -24,6 +24,38 @@ from _rust.tidal import (
 logger = logging.getLogger(__name__)
 
 
+class _StreamInfo:
+    """Wraps the Rust StreamInfo dict and exposes the tidalapi.Stream
+    attributes the rest of the app already reads (bit_depth, sample_rate,
+    audio_quality, manifest_mime_type, urls, manifest_data, is_bts, is_mpd).
+    Phase 5 refactor — keeps the get_stream_url body unchanged."""
+
+    __slots__ = ("_d",)
+
+    def __init__(self, data):
+        self._d = data or {}
+
+    def __getattr__(self, name):
+        d = object.__getattribute__(self, "_d")
+        if name in d:
+            return d[name]
+        raise AttributeError(name)
+
+    def get_urls(self):
+        return list(self._d.get("urls") or [])
+
+    def get_manifest_data(self):
+        return str(self._d.get("manifest_data") or "")
+
+    @property
+    def is_bts(self):
+        return bool(self._d.get("is_bts"))
+
+    @property
+    def is_mpd(self):
+        return bool(self._d.get("is_mpd"))
+
+
 class _RustSearchResults:
     """Tidalapi-shaped search-result view backed by Rust JSON. Exposes
     `.artists / .albums / .tracks / .videos / .playlists` as lists of
@@ -3940,36 +3972,64 @@ class TidalBackend:
                 if event is not None:
                     event.set()
 
-    def _get_url_from_stream(self, full_track):
-        """Resolve a playable URI via the newer playbackinfopostpaywall endpoint.
+    def _fetch_legacy_url(self, track_id, quality, full_track):
+        """Legacy urlpostpaywall URL. Rust path when available; tidalapi as
+        last resort. tidalapi gates this behind an is_pkce check (PKCE tokens
+        can't access this endpoint at hi-res), so the Rust path mirrors that."""
+        if self._rust_session is not None:
+            try:
+                return self._rust_session.fetch_legacy_url(int(track_id), quality)
+            except RustTidalCoreError as e:
+                logger.debug("rust legacy url error [%s]: %s", e.kind, e)
+        return full_track.get_url()
 
-        Uses get_stream() which supports HI_RES_LOSSLESS and works with all auth
-        types, unlike the legacy urlpostpaywall endpoint which caps at LOSSLESS.
+    def _get_url_from_stream(self, full_track, quality):
+        """Resolve a playable URI via the modern playbackinfopostpaywall endpoint.
 
-        Returns (uri, stream) on success, raises on failure.
-        - BTS manifests: direct HTTP URL, the native transport handles fetch.
-        - MPD manifests: written to a temp file and returned as file:// URI so
-          the native transport's DASH parser can read and fetch segments.
+        Phase 5: this hits the Rust core directly. The Rust call decodes the
+        base64 manifest in one step and, for BTS, expands the inner JSON's
+        urls/codecs/etc. We get a single round-trip + a single decode.
+
+        Returns (uri, stream_info) on success, raises on failure.
+        - BTS manifests: direct HTTP URL, the native transport fetches.
+        - MPD manifests: written to a per-track temp file (a shared file
+          races against prefetch overwriting it mid-read) and returned as a
+          file:// URI so the native transport's DASH parser handles it.
         """
         import os
         import tempfile
 
-        stream = full_track.get_stream()
-        manifest = stream.get_stream_manifest()
+        if self._rust_session is None:
+            # Old tidalapi path retained for the rare case the .so isn't loaded.
+            stream = full_track.get_stream()
+            manifest = stream.get_stream_manifest()
+            if manifest.is_bts:
+                urls = manifest.get_urls()
+                if not urls:
+                    raise ValueError("Empty URL list in BTS manifest")
+                return urls[0], stream
+            if manifest.is_mpd:
+                mpd_xml = stream.get_manifest_data()
+                track_id = str(getattr(full_track, "id", "") or "tmp")
+                tmp_path = os.path.join(tempfile.gettempdir(), f"hiresti_{track_id}.mpd")
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(mpd_xml)
+                return f"file://{tmp_path}", stream
+            raise ValueError(f"Unknown manifest type: {stream.manifest_mime_type}")
 
-        if manifest.is_bts:
-            urls = manifest.get_urls()
-            if not urls:
+        track_id = int(getattr(full_track, "id", 0) or 0)
+        if not track_id:
+            raise ValueError("track has no id")
+        info_dict = self._rust_session.fetch_stream(track_id, quality)
+        stream = _StreamInfo(info_dict)
+
+        if stream.is_bts:
+            if not stream.urls:
                 raise ValueError("Empty URL list in BTS manifest")
-            return urls[0], stream
+            return stream.urls[0], stream
 
-        if manifest.is_mpd:
-            # Write the MPD XML to a per-track temp file.  Using a shared single
-            # file caused a race condition: the prefetch thread overwrote the file
-            # for the current track before the transport finished reading it,
-            # loading the wrong track's segments.
-            mpd_xml = stream.get_manifest_data()
-            track_id = str(getattr(full_track, "id", "") or "tmp")
+        if stream.is_mpd:
+            mpd_xml = stream.manifest_data
             tmp_path = os.path.join(
                 tempfile.gettempdir(), f"hiresti_{track_id}.mpd"
             )
@@ -4002,14 +4062,14 @@ class TidalBackend:
                     url = None
                     stream_info = None
                     try:
-                        url, stream_info = self._get_url_from_stream(full_track)
+                        url, stream_info = self._get_url_from_stream(full_track, q)
                     except Exception as stream_exc:
                         logger.debug(
                             "get_stream() path failed (%s), falling back to get_url(): %s",
                             type(stream_exc).__name__,
                             stream_exc,
                         )
-                        url = full_track.get_url()
+                        url = self._fetch_legacy_url(int(track.id), q, full_track)
 
                     # Cache source format from TIDAL API for the player to inject
                     # into stream_info (TAG events don't carry Hz/-bit info).

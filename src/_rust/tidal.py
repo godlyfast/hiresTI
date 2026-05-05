@@ -160,6 +160,12 @@ class _RustTidalCore:
             lib.rtc_session_count.restype = ctypes.c_void_p
             lib.rtc_session_count.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 
+            lib.rtc_session_fetch_stream.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_stream.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
+            lib.rtc_session_fetch_legacy_url.restype = ctypes.c_void_p
+            lib.rtc_session_fetch_legacy_url.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
             lib.rtc_token_read_file.restype = ctypes.c_void_p
             lib.rtc_token_read_file.argtypes = [ctypes.c_char_p]
 
@@ -432,6 +438,36 @@ class RustTidalSession:
             lib.rtc_session_count(self._handle, str(kind).encode("utf-8"))
         )
         return int(out.get("count", 0)) if isinstance(out, dict) else 0
+
+    # ----- Stream + manifest (Phase 5) -----
+    def fetch_stream(
+        self,
+        track_id: int,
+        audio_quality: str,
+        *,
+        playback_mode: str = "STREAM",
+        asset_presentation: str = "FULL",
+    ) -> dict:
+        """Fetch + decode the playbackinfopostpaywall envelope. Returns a
+        StreamInfo dict — already base64-decoded; for BTS the inner JSON's
+        urls/codecs/etc are flattened in."""
+        return self._call_session_with_json(
+            "rtc_session_fetch_stream",
+            {
+                "track_id": int(track_id),
+                "audio_quality": str(audio_quality),
+                "playback_mode": str(playback_mode),
+                "asset_presentation": str(asset_presentation),
+            },
+        )
+
+    def fetch_legacy_url(self, track_id: int, audio_quality: str) -> str:
+        """Legacy urlpostpaywall fallback. Returns the first URL."""
+        out = self._call_session_with_json(
+            "rtc_session_fetch_legacy_url",
+            {"track_id": int(track_id), "audio_quality": str(audio_quality)},
+        )
+        return str(out.get("url") or "") if isinstance(out, dict) else ""
 
     def request(
         self,

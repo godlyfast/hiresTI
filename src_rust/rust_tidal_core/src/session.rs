@@ -119,6 +119,18 @@ impl Session {
         self.inner.lock().user.clone()
     }
 
+    /// Whether the current token came through PKCE auth. Used by the
+    /// stream layer to gate the legacy urlpostpaywall endpoint, which
+    /// rejects PKCE tokens at hi-res quality.
+    pub fn is_pkce(&self) -> bool {
+        self.inner
+            .lock()
+            .token
+            .as_ref()
+            .map(|t| t.is_pkce)
+            .unwrap_or(false)
+    }
+
     pub fn check_login(&self) -> bool {
         let state = self.inner.lock();
         let (Some(token), Some(user)) = (state.token.clone(), state.user.clone()) else {
@@ -312,6 +324,21 @@ impl Session {
         args: &ListArgs,
     ) -> RtcResult<PageResponse<PlaylistItem>> {
         lists::mix_items(self, mix_id, args)
+    }
+
+    // ----- Stream + manifest (Phase 5) -----
+    pub fn fetch_stream(
+        &self,
+        track_id: i64,
+        audio_quality: &str,
+        playback_mode: Option<&str>,
+        asset_presentation: Option<&str>,
+    ) -> RtcResult<crate::stream::StreamInfo> {
+        crate::stream::fetch_stream(self, track_id, audio_quality, playback_mode, asset_presentation)
+    }
+
+    pub fn fetch_legacy_url(&self, track_id: i64, audio_quality: &str) -> RtcResult<String> {
+        crate::stream::fetch_legacy_url(self, track_id, audio_quality)
     }
 
     pub fn refresh_token(&self) -> RtcResult<TokenInfo> {
