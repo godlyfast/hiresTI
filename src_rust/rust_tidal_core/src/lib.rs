@@ -9,7 +9,9 @@
 mod auth;
 mod endpoints;
 mod error;
+mod favorites;
 mod http;
+mod lists;
 mod models;
 mod request;
 mod session;
@@ -403,6 +405,168 @@ pub unsafe extern "C" fn rtc_parse_model(args_json: *const c_char) -> *mut c_cha
     let result = (|| -> RtcResult<serde_json::Value> {
         let args: ParseArgs = parse_json_input(args_json, "args_json")?;
         crate::endpoints::parse_typed(&args.kind, &args.value)
+    })();
+    handle(result)
+}
+
+// ---------------------------------------------------------------------------
+// Favorites + list endpoints (Phase 4)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_favorites_add(
+    handle_ptr: *mut Session,
+    kind: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let kind = crate::favorites::FavoriteKind::from_str(cstr_or_invalid(kind, "kind")?)?;
+        let id = cstr_or_invalid(id, "id")?;
+        Ok(serde_json::json!({"ok": session.favorites_add(kind, id)?}))
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_favorites_remove(
+    handle_ptr: *mut Session,
+    kind: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let kind = crate::favorites::FavoriteKind::from_str(cstr_or_invalid(kind, "kind")?)?;
+        let id = cstr_or_invalid(id, "id")?;
+        Ok(serde_json::json!({"ok": session.favorites_remove(kind, id)?}))
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_favorites_mix_toggle(
+    handle_ptr: *mut Session,
+    mix_id: *const c_char,
+    add: c_int,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let id = cstr_or_invalid(mix_id, "mix_id")?;
+        Ok(serde_json::json!({
+            "ok": session.favorites_mix_toggle(id, add != 0)?
+        }))
+    })();
+    handle(result)
+}
+
+/// Listing endpoint dispatcher. `args_json` schema:
+/// `{"kind": "albums|artists|tracks|mixes|playlists|playlist_folders|
+///           album_tracks|playlist_items|playlist_tracks|mix_items",
+///   "limit": 50, "offset": 0, "order": "DATE", "order_direction": "DESC",
+///   "id": "..." | <int>, "folder_id": "root"}`
+/// Returns a PageResponse: `{items, total_number_of_items, limit, offset}`.
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_list(
+    handle_ptr: *mut Session,
+    args_json: *const c_char,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct Args {
+        kind: String,
+        #[serde(default = "default_limit")]
+        limit: i32,
+        #[serde(default)]
+        offset: i32,
+        #[serde(default)]
+        order: Option<String>,
+        #[serde(default)]
+        order_direction: Option<String>,
+        #[serde(default)]
+        id: Option<serde_json::Value>,
+        #[serde(default)]
+        folder_id: Option<String>,
+    }
+    fn default_limit() -> i32 {
+        50
+    }
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let args: Args = parse_json_input(args_json, "args_json")?;
+        let list_args = crate::favorites::ListArgs {
+            limit: args.limit,
+            offset: args.offset,
+            order: args.order.clone(),
+            order_direction: args.order_direction.clone(),
+        };
+        let id_str = args.id.as_ref().and_then(|v| v.as_str()).map(str::to_string);
+        let id_int = args.id.as_ref().and_then(|v| v.as_i64());
+        let kind = args.kind.to_ascii_lowercase();
+        let folder_id = args.folder_id.unwrap_or_else(|| "root".to_string());
+        let value: serde_json::Value = match kind.as_str() {
+            "favorite_albums" | "albums" => {
+                serde_json::to_value(session.list_favorite_albums(&list_args)?)?
+            }
+            "favorite_artists" | "artists" => {
+                serde_json::to_value(session.list_favorite_artists(&list_args)?)?
+            }
+            "favorite_tracks" | "tracks" => {
+                serde_json::to_value(session.list_favorite_tracks(&list_args)?)?
+            }
+            "favorite_mixes" | "mixes" => {
+                serde_json::to_value(session.list_favorite_mixes(&list_args)?)?
+            }
+            "user_playlists" | "playlists" => {
+                serde_json::to_value(session.list_user_playlists(&folder_id, &list_args)?)?
+            }
+            "playlist_folders" => {
+                serde_json::to_value(session.list_playlist_folders(&folder_id, &list_args)?)?
+            }
+            "album_tracks" => {
+                let id = id_int
+                    .or_else(|| id_str.as_ref().and_then(|s| s.parse().ok()))
+                    .ok_or_else(|| RtcError::InvalidInput("album_tracks needs numeric id".into()))?;
+                serde_json::to_value(session.album_tracks(id, &list_args)?)?
+            }
+            "playlist_items" => {
+                let id = id_str
+                    .clone()
+                    .ok_or_else(|| RtcError::InvalidInput("playlist_items needs id".into()))?;
+                serde_json::to_value(session.playlist_items(&id, &list_args)?)?
+            }
+            "playlist_tracks" => {
+                let id = id_str
+                    .clone()
+                    .ok_or_else(|| RtcError::InvalidInput("playlist_tracks needs id".into()))?;
+                serde_json::to_value(session.playlist_tracks(&id, &list_args)?)?
+            }
+            "mix_items" => {
+                let id = id_str
+                    .clone()
+                    .ok_or_else(|| RtcError::InvalidInput("mix_items needs id".into()))?;
+                serde_json::to_value(session.mix_items_list(&id, &list_args)?)?
+            }
+            other => return Err(RtcError::InvalidInput(format!("unknown list kind: {}", other))),
+        };
+        Ok(value)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_count(
+    handle_ptr: *mut Session,
+    kind: *const c_char,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let kind = cstr_or_invalid(kind, "kind")?.to_ascii_lowercase();
+        let count = match kind.as_str() {
+            "favorite_albums" | "albums" => session.count_favorite_albums()?,
+            "favorite_artists" | "artists" => session.count_favorite_artists()?,
+            "favorite_tracks" | "tracks" => session.count_favorite_tracks()?,
+            other => return Err(RtcError::InvalidInput(format!("unknown count kind: {}", other))),
+        };
+        Ok(serde_json::json!({"count": count}))
     })();
     handle(result)
 }

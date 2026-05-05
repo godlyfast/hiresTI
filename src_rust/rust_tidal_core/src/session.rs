@@ -12,6 +12,8 @@ use crate::auth::{
 use crate::error::{RtcError, RtcResult};
 use crate::http::{build_agent, json_body, ok_response};
 use crate::endpoints;
+use crate::favorites::{self, FavoriteKind, ListArgs, PageResponse};
+use crate::lists::{self, PlaylistItem};
 use crate::models::{Album, Artist, Folder, Mix, Playlist, SearchResults, Track};
 use crate::request::{perform_request, ParamValue, RequestArgs, ResponseJson};
 
@@ -238,6 +240,78 @@ impl Session {
         extra_params: Option<std::collections::BTreeMap<String, ParamValue>>,
     ) -> RtcResult<serde_json::Value> {
         endpoints::page_get_raw(self, path, extra_params)
+    }
+
+    // ----- Favorites (Phase 4) -----
+    pub fn favorites_add(&self, kind: FavoriteKind, id: &str) -> RtcResult<bool> {
+        favorites::favorites_add(self, kind, id)
+    }
+    pub fn favorites_remove(&self, kind: FavoriteKind, id: &str) -> RtcResult<bool> {
+        favorites::favorites_remove(self, kind, id)
+    }
+    pub fn favorites_mix_toggle(&self, mix_id: &str, add: bool) -> RtcResult<bool> {
+        favorites::favorites_mix_toggle(self, mix_id, add)
+    }
+    pub fn list_favorite_albums(&self, args: &ListArgs) -> RtcResult<PageResponse<Album>> {
+        favorites::list_favorite_albums(self, args)
+    }
+    pub fn list_favorite_artists(&self, args: &ListArgs) -> RtcResult<PageResponse<Artist>> {
+        favorites::list_favorite_artists(self, args)
+    }
+    pub fn list_favorite_tracks(&self, args: &ListArgs) -> RtcResult<PageResponse<Track>> {
+        favorites::list_favorite_tracks(self, args)
+    }
+    pub fn list_favorite_mixes(&self, args: &ListArgs) -> RtcResult<PageResponse<Mix>> {
+        favorites::list_favorite_mixes(self, args)
+    }
+    pub fn list_user_playlists(
+        &self,
+        folder_id: &str,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<Playlist>> {
+        favorites::list_user_playlists(self, folder_id, args)
+    }
+    pub fn list_playlist_folders(
+        &self,
+        folder_id: &str,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<Folder>> {
+        favorites::list_playlist_folders(self, folder_id, args)
+    }
+    pub fn count_favorite_albums(&self) -> RtcResult<i32> {
+        favorites::count_favorite_albums(self)
+    }
+    pub fn count_favorite_artists(&self) -> RtcResult<i32> {
+        favorites::count_favorite_artists(self)
+    }
+    pub fn count_favorite_tracks(&self) -> RtcResult<i32> {
+        favorites::count_favorite_tracks(self)
+    }
+
+    // ----- Album / playlist / mix item listings (Phase 4) -----
+    pub fn album_tracks(&self, album_id: i64, args: &ListArgs) -> RtcResult<PageResponse<Track>> {
+        lists::album_tracks(self, album_id, args)
+    }
+    pub fn playlist_items(
+        &self,
+        playlist_id: &str,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<PlaylistItem>> {
+        lists::playlist_items(self, playlist_id, args)
+    }
+    pub fn playlist_tracks(
+        &self,
+        playlist_id: &str,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<Track>> {
+        lists::playlist_tracks(self, playlist_id, args)
+    }
+    pub fn mix_items_list(
+        &self,
+        mix_id: &str,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<PlaylistItem>> {
+        lists::mix_items(self, mix_id, args)
     }
 
     pub fn refresh_token(&self) -> RtcResult<TokenInfo> {

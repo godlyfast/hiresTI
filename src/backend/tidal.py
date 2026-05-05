@@ -30,18 +30,24 @@ class _RustSearchResults:
     wrapped model objects so callers using the legacy attribute or dict
     pattern keep working unchanged."""
 
-    __slots__ = ("_raw", "_tidalapi_session", "_cache")
+    __slots__ = ("_raw", "_tidalapi_session", "_rust_session", "_cache")
 
-    def __init__(self, raw: dict, tidalapi_session) -> None:
+    def __init__(self, raw: dict, tidalapi_session, rust_session=None) -> None:
         self._raw = raw or {}
         self._tidalapi_session = tidalapi_session
+        self._rust_session = rust_session
         self._cache: dict = {}
 
     def _wrap(self, key: str, kind: str):
         if key in self._cache:
             return self._cache[key]
         items = [
-            wrap_model(kind, item, tidalapi_session=self._tidalapi_session)
+            wrap_model(
+                kind,
+                item,
+                tidalapi_session=self._tidalapi_session,
+                rust_session=self._rust_session,
+            )
             for item in (self._raw.get(key) or [])
         ]
         self._cache[key] = items
@@ -538,7 +544,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_track(%s) error [%s]: %s", track_id, e.kind, e)
             return self.session.track(int(track_id))
-        return wrap_model("track", data, tidalapi_session=self.session)
+        return wrap_model("track", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_album(self, album_id):
         if self._rust_session is None:
@@ -548,7 +554,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_album(%s) error [%s]: %s", album_id, e.kind, e)
             return self.session.album(int(album_id))
-        return wrap_model("album", data, tidalapi_session=self.session)
+        return wrap_model("album", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_artist(self, artist_or_id):
         if hasattr(artist_or_id, "id") and not isinstance(artist_or_id, (int, str)):
@@ -564,7 +570,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_artist(%s) error [%s]: %s", aid, e.kind, e)
             return self.session.artist(aid)
-        return wrap_model("artist", data, tidalapi_session=self.session)
+        return wrap_model("artist", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_playlist(self, playlist_id):
         pid = str(playlist_id or "").strip()
@@ -577,7 +583,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_playlist(%s) error [%s]: %s", pid, e.kind, e)
             return self.session.playlist(pid)
-        return wrap_model("playlist", data, tidalapi_session=self.session)
+        return wrap_model("playlist", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_mix(self, mix_id):
         mid = str(mix_id or "").strip()
@@ -590,7 +596,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_mix(%s) error [%s]: %s", mid, e.kind, e)
             return self.session.mix(mid)
-        return wrap_model("mix", data, tidalapi_session=self.session)
+        return wrap_model("mix", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_folder(self, folder_id):
         fid = str(folder_id or "").strip()
@@ -603,7 +609,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust fetch_folder(%s) error [%s]: %s", fid, e.kind, e)
             return self.session.folder(fid)
-        return wrap_model("folder", data, tidalapi_session=self.session)
+        return wrap_model("folder", data, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _rust_search(self, query, limit=50):
         if self._rust_session is None:
@@ -613,7 +619,7 @@ class TidalBackend:
         except RustTidalCoreError as e:
             logger.debug("rust search('%s') error [%s]: %s", query, e.kind, e)
             return self.session.search(str(query), limit=int(limit))
-        return _RustSearchResults(raw, self.session)
+        return _RustSearchResults(raw, self.session, rust_session=self._rust_session)
 
     def _rust_parse(self, kind, data):
         kind = str(kind).lower()
@@ -626,7 +632,7 @@ class TidalBackend:
             logger.debug("rust parse_%s error [%s]: %s", kind, e.kind, e)
             fallback = getattr(self.session, f"parse_{kind}", None)
             return fallback(data) if callable(fallback) else None
-        return wrap_model(kind, parsed, tidalapi_session=self.session)
+        return wrap_model(kind, parsed, tidalapi_session=self.session, rust_session=self._rust_session)
 
     def _serialize_expiry(self, value):
         if hasattr(value, "isoformat"):
@@ -914,13 +920,35 @@ class TidalBackend:
         self._cached_albums = []
         self._cached_albums_ts = 0.0
 
+    def _toggle_favorite(self, kind, item_id, add):
+        """Phase 4: route favorite add/remove through Rust. Falls back to
+        tidalapi if the .so is missing."""
+        if self._rust_session is not None:
+            try:
+                if add:
+                    return self._rust_session.favorites_add(kind, item_id)
+                return self._rust_session.favorites_remove(kind, item_id)
+            except RustTidalCoreError as e:
+                logger.debug("rust favorite %s/%s error [%s]: %s", kind, item_id, e.kind, e)
+        fav = self.user.favorites
+        if kind == "album":
+            (fav.add_album if add else fav.remove_album)(item_id)
+        elif kind == "artist":
+            (fav.add_artist if add else fav.remove_artist)(item_id)
+        elif kind == "track":
+            adder = getattr(fav, "add_track", None) or (lambda i: fav.add_tracks([i]))
+            remover = getattr(fav, "remove_track", None) or (lambda i: fav.remove_tracks([i]))
+            (adder if add else remover)(item_id)
+        else:
+            raise ValueError(f"unknown favorite kind: {kind}")
+        return True
+
     def toggle_album_favorite(self, album_id, add=True):
         try:
+            self._toggle_favorite("album", album_id, add)
             if add:
-                self.user.favorites.add_album(album_id)
                 self.fav_album_ids.add(str(album_id))
             else:
-                self.user.favorites.remove_album(album_id)
                 self.fav_album_ids.discard(str(album_id))
             self._sync_recent_albums_cache_after_favorite_toggle(album_id, add)
             return True
@@ -930,11 +958,10 @@ class TidalBackend:
 
     def toggle_artist_favorite(self, artist_id, add=True):
         try:
+            self._toggle_favorite("artist", artist_id, add)
             if add:
-                self.user.favorites.add_artist(artist_id)
                 self.fav_artist_ids.add(str(artist_id))
             else:
-                self.user.favorites.remove_artist(artist_id)
                 self.fav_artist_ids.discard(str(artist_id))
             self._favorite_artists_index_dirty = True
             return True
@@ -943,17 +970,21 @@ class TidalBackend:
             return False
 
     def toggle_mix_favorite(self, mix_id, add=True):
-        # Tidal's "Mixes & Radio" favorites collection.  tidalapi 0.8.11
-        # exposes these as `add_mixes` / `remove_mixes` and accepts either
-        # a string or a list of ids; we always pass a single id so the
-        # request URL stays small.
+        # Tidal's "Mixes & Radio" favorites collection — v2 endpoint with
+        # mixIds query param. The legacy add_mixes/remove_mixes wrappers in
+        # tidalapi accept either a string or a list; we always pass a
+        # single id so the URL stays small.
         try:
-            fav = self.user.favorites
+            if self._rust_session is not None:
+                ok = self._rust_session.favorites_mix_toggle(str(mix_id), add)
+                if not ok:
+                    raise RuntimeError("rust mix toggle returned ok=false")
+            else:
+                fav = self.user.favorites
+                (fav.add_mixes if add else fav.remove_mixes)(str(mix_id))
             if add:
-                fav.add_mixes(str(mix_id))
                 self.fav_mix_ids.add(str(mix_id))
             else:
-                fav.remove_mixes(str(mix_id))
                 self.fav_mix_ids.discard(str(mix_id))
             return True
         except Exception as e:
@@ -962,22 +993,10 @@ class TidalBackend:
 
     def toggle_track_favorite(self, track_id, add=True):
         try:
-            fav = self.user.favorites
+            self._toggle_favorite("track", track_id, add)
             if add:
-                if hasattr(fav, "add_track"):
-                    fav.add_track(track_id)
-                elif hasattr(fav, "add_tracks"):
-                    fav.add_tracks([track_id])
-                else:
-                    raise AttributeError("favorites API has no add_track(s)")
                 self.fav_track_ids.add(str(track_id))
             else:
-                if hasattr(fav, "remove_track"):
-                    fav.remove_track(track_id)
-                elif hasattr(fav, "remove_tracks"):
-                    fav.remove_tracks([track_id])
-                else:
-                    raise AttributeError("favorites API has no remove_track(s)")
                 self.fav_track_ids.discard(str(track_id))
             return True
         except Exception as e:
@@ -1113,7 +1132,22 @@ class TidalBackend:
             logger.warning("Failed to fetch favorite artists: %s", e)
             return []
 
+    def _resolve_artist_sort(self, sort_key):
+        """Map UI sort tokens (name_asc/desc, recent_asc/desc, ...) to TIDAL
+        order/orderDirection params. Returns (order_str, direction_str)."""
+        sort_key = str(sort_key or "name_asc").strip().lower()
+        if sort_key.startswith("name"):
+            return ("NAME", "DESC" if sort_key.endswith("_desc") else "ASC")
+        return ("DATE", "ASC" if sort_key.endswith("_asc") else "DESC")
+
     def get_favorite_artists_count(self):
+        try:
+            if self._rust_session is not None:
+                def _fetch():
+                    return self._rust_session.count("artists")
+                return max(0, int(self._call_with_session_recovery(_fetch, context="favorite artists count") or 0))
+        except RustTidalCoreError as e:
+            logger.debug("rust artists count error [%s]: %s", e.kind, e)
         try:
             def _fetch():
                 if not self.user:
@@ -1122,8 +1156,6 @@ class TidalBackend:
                 count_api = getattr(fav, "get_artists_count", None)
                 if callable(count_api):
                     return max(0, int(count_api() or 0))
-                # API doesn't expose a count endpoint; return 0 and let the caller
-                # derive the total from page results (offset + len(items)).
                 return 0
 
             return max(0, int(self._call_with_session_recovery(_fetch, context="favorite artists count") or 0))
@@ -1134,26 +1166,41 @@ class TidalBackend:
     def get_favorite_artists_page(self, limit=50, offset=0, sort="name_asc"):
         page_size = max(1, int(limit or 50))
         page_offset = max(0, int(offset or 0))
-        sort_key = str(sort or "name_asc").strip().lower()
+        order, direction = self._resolve_artist_sort(sort)
+        if self._rust_session is not None:
+            try:
+                def _fetch():
+                    page = self._rust_session.list(
+                        "favorite_artists",
+                        limit=page_size,
+                        offset=page_offset,
+                        order=order,
+                        order_direction=direction,
+                    )
+                    items = (page or {}).get("items") or []
+                    return [
+                        wrap_model(
+                            "artist",
+                            it,
+                            tidalapi_session=self.session,
+                            rust_session=self._rust_session,
+                        )
+                        for it in items
+                    ]
 
-        order = None
-        order_direction = None
-        if sort_key.startswith("name"):
-            order = getattr(tidal_user.ArtistOrder, "Name", None)
-            order_direction = (
-                getattr(tidal_user.OrderDirection, "Descending", None)
-                if sort_key.endswith("_desc")
-                else getattr(tidal_user.OrderDirection, "Ascending", None)
-            )
-        else:
-            order = getattr(tidal_user.ArtistOrder, "DateAdded", None)
-            order_direction = (
-                getattr(tidal_user.OrderDirection, "Ascending", None)
-                if sort_key.endswith("_asc")
-                else getattr(tidal_user.OrderDirection, "Descending", None)
-            )
+                return list(self._call_with_session_recovery(_fetch, context="favorite artists page") or [])
+            except RustTidalCoreError as e:
+                logger.debug("rust favorite_artists page error [%s]: %s", e.kind, e)
 
+        # Fallback: tidalapi enum-based path.
         try:
+            tidal_order = getattr(tidal_user.ArtistOrder, "Name" if order == "NAME" else "DateAdded", None)
+            tidal_dir = getattr(
+                tidal_user.OrderDirection,
+                "Ascending" if direction == "ASC" else "Descending",
+                None,
+            )
+
             def _fetch():
                 if not self.user:
                     return []
@@ -1162,10 +1209,10 @@ class TidalBackend:
                 if not callable(artists_api):
                     return []
                 kwargs = {"limit": page_size, "offset": page_offset}
-                if order is not None:
-                    kwargs["order"] = order
-                if order_direction is not None:
-                    kwargs["order_direction"] = order_direction
+                if tidal_order is not None:
+                    kwargs["order"] = tidal_order
+                if tidal_dir is not None:
+                    kwargs["order_direction"] = tidal_dir
                 res = artists_api(**kwargs)
                 return list((res() if callable(res) else res) or [])
 
@@ -1175,7 +1222,7 @@ class TidalBackend:
                 "Failed to fetch favorite artists page offset=%s limit=%s sort=%s: %s",
                 page_offset,
                 page_size,
-                sort_key,
+                sort,
                 e,
             )
             return []
@@ -1185,6 +1232,25 @@ class TidalBackend:
             def _fetch():
                 if not self.user:
                     return []
+                if self._rust_session is not None:
+                    try:
+                        from _rust.tidal import _drain_pages
+                        items = _drain_pages(
+                            self._rust_session,
+                            "favorite_albums",
+                            page_size=1000,
+                        )
+                        if items is not None:
+                            return [
+                                wrap_model(
+                                    "album", a,
+                                    tidalapi_session=self.session,
+                                    rust_session=self._rust_session,
+                                )
+                                for a in items[: int(limit or 0)]
+                            ]
+                    except RustTidalCoreError as e:
+                        logger.debug("rust favorite_albums drain error [%s]: %s", e.kind, e)
                 fav = getattr(self.user, "favorites", None)
                 return self._fetch_favorites_collection(
                     fav,
@@ -1289,10 +1355,51 @@ class TidalBackend:
             order_obj = None
             order_direction = None
 
+        # Map UI sort keys to TIDAL order/orderDirection strings for Rust.
+        order_str = "DATE"
+        direction_str = "DESC"
+        if sort_key == "title":
+            order_str, direction_str = "NAME", "ASC"
+        elif sort_key == "artist":
+            order_str, direction_str = "ARTIST", "ASC"
+        elif sort_key == "album":
+            order_str, direction_str = "ALBUM", "ASC"
+        elif sort_key == "duration":
+            order_str, direction_str = "LENGTH", "ASC"
+
         try:
             def _fetch():
                 if not self.user:
                     return []
+                target = max(0, int(limit or 0))
+                if target <= 0:
+                    return []
+
+                # Phase 4 fast path: Rust drives the pagination loop.
+                if self._rust_session is not None:
+                    try:
+                        from _rust.tidal import _drain_pages
+                        items = _drain_pages(
+                            self._rust_session,
+                            "favorite_tracks",
+                            page_size=1000,
+                            order=order_str,
+                            order_direction=direction_str,
+                        )
+                        if items is not None:
+                            wrapped = [
+                                wrap_model(
+                                    "track", t,
+                                    tidalapi_session=self.session,
+                                    rust_session=self._rust_session,
+                                )
+                                for t in items[:target]
+                            ]
+                            if wrapped:
+                                return wrapped
+                    except RustTidalCoreError as e:
+                        logger.debug("rust favorite_tracks drain error [%s]: %s", e.kind, e)
+
                 fav = getattr(self.user, "favorites", None)
                 if fav is None:
                     return []
@@ -1301,9 +1408,6 @@ class TidalBackend:
                 # path so the upstream sort is honored.  Fall back to the
                 # generic `_fetch_favorites_collection` (tracks_paginated)
                 # when the manual API isn't usable on this tidalapi version.
-                target = max(0, int(limit or 0))
-                if target <= 0:
-                    return []
                 tracks_api = getattr(fav, "tracks", None)
                 if callable(tracks_api) and order_obj is not None:
                     page_size = min(1000, max(1, target))
@@ -1381,6 +1485,33 @@ class TidalBackend:
                     continue
                 seen.add(pid)
                 merged.append(p)
+
+        # Phase 4 fast path: Rust v2 my-collection endpoint with pagination.
+        if self._rust_session is not None:
+            try:
+                from _rust.tidal import _drain_pages
+                items = _drain_pages(
+                    self._rust_session,
+                    "user_playlists",
+                    page_size=50,
+                    folder_id="root",
+                )
+                for p in (items or []):
+                    pid = str(p.get("id") or "")
+                    if not pid or pid in seen:
+                        continue
+                    seen.add(pid)
+                    merged.append(
+                        wrap_model(
+                            "playlist", p,
+                            tidalapi_session=self.session,
+                            rust_session=self._rust_session,
+                        )
+                    )
+                if merged:
+                    return merged[: max(0, int(limit or 0)) or None]
+            except RustTidalCoreError as e:
+                logger.debug("rust user_playlists error [%s]: %s", e.kind, e)
 
         try:
             if hasattr(self.user, "playlists"):

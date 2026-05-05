@@ -139,6 +139,27 @@ class _RustTidalCore:
             lib.rtc_parse_model.restype = ctypes.c_void_p
             lib.rtc_parse_model.argtypes = [ctypes.c_char_p]
 
+            lib.rtc_session_favorites_add.restype = ctypes.c_void_p
+            lib.rtc_session_favorites_add.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
+            ]
+
+            lib.rtc_session_favorites_remove.restype = ctypes.c_void_p
+            lib.rtc_session_favorites_remove.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
+            ]
+
+            lib.rtc_session_favorites_mix_toggle.restype = ctypes.c_void_p
+            lib.rtc_session_favorites_mix_toggle.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int,
+            ]
+
+            lib.rtc_session_list.restype = ctypes.c_void_p
+            lib.rtc_session_list.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
+            lib.rtc_session_count.restype = ctypes.c_void_p
+            lib.rtc_session_count.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
             lib.rtc_token_read_file.restype = ctypes.c_void_p
             lib.rtc_token_read_file.argtypes = [ctypes.c_char_p]
 
@@ -352,6 +373,66 @@ class RustTidalSession:
             {"path": str(path), "params": _scrub_params(params)},
         )
 
+    # ----- Favorites + listings (Phase 4) -----
+    def favorites_add(self, kind: str, item_id: Any) -> bool:
+        lib = self._core._require_lib()
+        out = self._core._result_or_raise(
+            lib.rtc_session_favorites_add(
+                self._handle, str(kind).encode("utf-8"), str(item_id).encode("utf-8")
+            )
+        )
+        return bool(out.get("ok")) if isinstance(out, dict) else False
+
+    def favorites_remove(self, kind: str, item_id: Any) -> bool:
+        lib = self._core._require_lib()
+        out = self._core._result_or_raise(
+            lib.rtc_session_favorites_remove(
+                self._handle, str(kind).encode("utf-8"), str(item_id).encode("utf-8")
+            )
+        )
+        return bool(out.get("ok")) if isinstance(out, dict) else False
+
+    def favorites_mix_toggle(self, mix_id: str, add: bool) -> bool:
+        lib = self._core._require_lib()
+        out = self._core._result_or_raise(
+            lib.rtc_session_favorites_mix_toggle(
+                self._handle, str(mix_id).encode("utf-8"), 1 if add else 0
+            )
+        )
+        return bool(out.get("ok")) if isinstance(out, dict) else False
+
+    def list(
+        self,
+        kind: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        order: Optional[str] = None,
+        order_direction: Optional[str] = None,
+        id: Any = None,
+        folder_id: Optional[str] = None,
+    ) -> dict:
+        """Returns {items, total_number_of_items, limit, offset}."""
+        return self._call_session_with_json(
+            "rtc_session_list",
+            {
+                "kind": str(kind),
+                "limit": int(limit),
+                "offset": int(offset),
+                "order": order,
+                "order_direction": order_direction,
+                "id": id,
+                "folder_id": folder_id,
+            },
+        )
+
+    def count(self, kind: str) -> int:
+        lib = self._core._require_lib()
+        out = self._core._result_or_raise(
+            lib.rtc_session_count(self._handle, str(kind).encode("utf-8"))
+        )
+        return int(out.get("count", 0)) if isinstance(out, dict) else 0
+
     def request(
         self,
         method: str,
@@ -440,9 +521,15 @@ class _RustModelBase:
 
     _tidalapi_factory = None  # type: Any
 
-    def __init__(self, data: dict, tidalapi_session=None) -> None:
+    def __init__(
+        self,
+        data: dict,
+        tidalapi_session=None,
+        rust_session: Optional["RustTidalSession"] = None,
+    ) -> None:
         object.__setattr__(self, "_data", dict(data or {}))
         object.__setattr__(self, "_tidalapi_session", tidalapi_session)
+        object.__setattr__(self, "_rust_session", rust_session)
         object.__setattr__(self, "_tidalapi_proxy", None)
 
     def __getattr__(self, name: str) -> Any:
@@ -521,12 +608,81 @@ def _make_folder_proxy(session, data):
     return fn(data["id"]) if data.get("id") else None
 
 
+def _drain_pages(rust_session, kind: str, *, page_size: int = 100, **list_kwargs):
+    """Phase 4 helper: page through a `_rust_session.list(kind=...)` endpoint
+    until the server says we have everything. Used by .tracks() / .items()
+    on the wrapped models so callers see the full list, the way tidalapi
+    returns it."""
+    if rust_session is None:
+        return None
+    items: list = []
+    offset = int(list_kwargs.get("offset", 0) or 0)
+    total: Optional[int] = None
+    while True:
+        page = rust_session.list(
+            kind,
+            limit=page_size,
+            offset=offset,
+            **{k: v for k, v in list_kwargs.items() if k != "offset"},
+        )
+        if not isinstance(page, dict):
+            break
+        chunk = page.get("items") or []
+        items.extend(chunk)
+        if total is None:
+            total = page.get("total_number_of_items")
+            if total is not None and total < 0:
+                total = None
+        offset += len(chunk)
+        if not chunk:
+            break
+        if total is not None and offset >= total:
+            break
+        if len(chunk) < page_size:
+            break
+    return items
+
+
 class RustTrack(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_track_proxy)
 
 
 class RustAlbum(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_album_proxy)
+
+    def tracks(self, limit: Optional[int] = None, offset: int = 0):
+        rust_session = self.__dict__.get("_rust_session")
+        if rust_session is None or not self._data.get("id"):
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+        try:
+            if limit is None:
+                items = _drain_pages(
+                    rust_session,
+                    "album_tracks",
+                    page_size=100,
+                    id=int(self._data["id"]),
+                )
+            else:
+                page = rust_session.list(
+                    "album_tracks",
+                    limit=int(limit),
+                    offset=int(offset),
+                    id=int(self._data["id"]),
+                )
+                items = (page or {}).get("items") or []
+        except RustTidalCoreError:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+        ts = self.__dict__.get("_tidalapi_session")
+        return [wrap_model("track", t, tidalapi_session=ts, rust_session=rust_session) for t in items or []]
+
+    def items(self, *args, **kwargs):
+        return self.tracks(*args, **kwargs)
 
 
 class RustArtist(_RustModelBase):
@@ -536,9 +692,121 @@ class RustArtist(_RustModelBase):
 class RustPlaylist(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_playlist_proxy)
 
+    def tracks(self, limit: Optional[int] = None, offset: int = 0):
+        rust_session = self.__dict__.get("_rust_session")
+        pid = self._data.get("id")
+        if rust_session is None or not pid:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+        try:
+            if limit is None:
+                items = _drain_pages(
+                    rust_session,
+                    "playlist_tracks",
+                    page_size=100,
+                    id=str(pid),
+                )
+            else:
+                page = rust_session.list(
+                    "playlist_tracks",
+                    limit=int(limit),
+                    offset=int(offset),
+                    id=str(pid),
+                )
+                items = (page or {}).get("items") or []
+        except RustTidalCoreError:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.tracks() if limit is None else proxy.tracks(limit=limit, offset=offset)
+        ts = self.__dict__.get("_tidalapi_session")
+        return [wrap_model("track", t, tidalapi_session=ts, rust_session=rust_session) for t in items or []]
+
+    def items(self, limit: Optional[int] = None, offset: int = 0):
+        rust_session = self.__dict__.get("_rust_session")
+        pid = self._data.get("id")
+        if rust_session is None or not pid:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+        try:
+            if limit is None:
+                items = _drain_pages(
+                    rust_session,
+                    "playlist_items",
+                    page_size=100,
+                    id=str(pid),
+                )
+            else:
+                page = rust_session.list(
+                    "playlist_items",
+                    limit=int(limit),
+                    offset=int(offset),
+                    id=str(pid),
+                )
+                items = (page or {}).get("items") or []
+        except RustTidalCoreError:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+        ts = self.__dict__.get("_tidalapi_session")
+        # Each item is {"kind": "track" | "video", ...}; extract the inner
+        # model so callers can keep using attribute access.
+        out = []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            kind = it.get("kind", "track")
+            inner = {k: v for k, v in it.items() if k != "kind"}
+            out.append(wrap_model(kind, inner, tidalapi_session=ts, rust_session=rust_session))
+        return out
+
 
 class RustMix(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_mix_proxy)
+
+    def items(self, limit: Optional[int] = None, offset: int = 0):
+        rust_session = self.__dict__.get("_rust_session")
+        mid = self._data.get("id")
+        if rust_session is None or not mid:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+        try:
+            if limit is None:
+                items = _drain_pages(
+                    rust_session,
+                    "mix_items",
+                    page_size=100,
+                    id=str(mid),
+                )
+            else:
+                page = rust_session.list(
+                    "mix_items",
+                    limit=int(limit),
+                    offset=int(offset),
+                    id=str(mid),
+                )
+                items = (page or {}).get("items") or []
+        except RustTidalCoreError:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return []
+            return proxy.items() if limit is None else proxy.items(limit=limit, offset=offset)
+        ts = self.__dict__.get("_tidalapi_session")
+        out = []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            kind = it.get("kind", "track")
+            inner = {k: v for k, v in it.items() if k != "kind"}
+            out.append(wrap_model(kind, inner, tidalapi_session=ts, rust_session=rust_session))
+        return out
 
 
 class RustFolder(_RustModelBase):
@@ -549,7 +817,7 @@ class RustVideo(_RustModelBase):
     _tidalapi_factory = None
 
 
-def wrap_model(kind: str, data: dict, tidalapi_session=None):
+def wrap_model(kind: str, data: dict, tidalapi_session=None, rust_session=None):
     cls = {
         "track": RustTrack,
         "album": RustAlbum,
@@ -561,7 +829,7 @@ def wrap_model(kind: str, data: dict, tidalapi_session=None):
     }.get(str(kind).lower())
     if cls is None:
         return data
-    return cls(data, tidalapi_session=tidalapi_session)
+    return cls(data, tidalapi_session=tidalapi_session, rust_session=rust_session)
 
 
 _singleton: Optional[_RustTidalCore] = None

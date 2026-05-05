@@ -17,7 +17,7 @@ use crate::models::{
 use crate::request::{ParamValue, RequestArgs};
 use crate::session::Session;
 
-fn ok_or_status(resp: crate::request::ResponseJson) -> RtcResult<Value> {
+pub fn ok_or_status(resp: crate::request::ResponseJson) -> RtcResult<Value> {
     if resp.ok {
         Ok(resp.body)
     } else if resp.status == 404 {
