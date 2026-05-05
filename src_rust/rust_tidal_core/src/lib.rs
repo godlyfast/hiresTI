@@ -9,6 +9,7 @@
 mod auth;
 mod error;
 mod http;
+mod request;
 mod session;
 
 use std::ffi::{CStr, CString};
@@ -270,6 +271,25 @@ pub unsafe extern "C" fn rtc_session_oauth_device_poll(handle_ptr: *mut Session)
             Some(user) => Ok(json!({"status": "ok", "user": user})),
             None => Ok(json!({"status": "pending"})),
         }
+    })();
+    handle(result)
+}
+
+/// Generic authenticated HTTP. Input JSON shape:
+/// `{ "method": "GET", "path": "search", "base_url": null, "params": {...},
+///    "headers": {...}, "json_body": null, "form_body": false }`
+/// Output: `{ "ok": bool, "status": int, "body": <parsed JSON or string> }`
+/// or an error payload.
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_request(
+    handle_ptr: *mut Session,
+    args_json: *const c_char,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        let args: crate::request::RequestArgs = parse_json_input(args_json, "args_json")?;
+        let resp = session.request(args)?;
+        Ok(serde_json::to_value(resp)?)
     })();
     handle(result)
 }

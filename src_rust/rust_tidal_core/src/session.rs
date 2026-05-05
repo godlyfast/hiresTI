@@ -11,6 +11,7 @@ use crate::auth::{
 };
 use crate::error::{RtcError, RtcResult};
 use crate::http::{build_agent, json_body, ok_response};
+use crate::request::{perform_request, RequestArgs, ResponseJson};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
@@ -184,6 +185,28 @@ impl Session {
                 Err(e)
             }
         }
+    }
+
+    /// Generic authenticated HTTP. Available once a token is loaded.
+    pub fn request(&self, args: RequestArgs) -> RtcResult<ResponseJson> {
+        let (access_token, country, session_id) = {
+            let state = self.inner.lock();
+            let token = state
+                .token
+                .as_ref()
+                .ok_or_else(|| RtcError::Auth("no session loaded — call load_token first".into()))?
+                .clone();
+            let country = state.user.as_ref().map(|u| u.country_code.clone());
+            let session_id = state.user.as_ref().map(|u| u.session_id.clone());
+            (token.access_token, country, session_id)
+        };
+        perform_request(
+            &self.agent,
+            &access_token,
+            country.as_deref(),
+            session_id.as_deref(),
+            args,
+        )
     }
 
     pub fn refresh_token(&self) -> RtcResult<TokenInfo> {

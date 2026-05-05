@@ -109,6 +109,9 @@ class _RustTidalCore:
             lib.rtc_session_pkce_finish.restype = ctypes.c_void_p
             lib.rtc_session_pkce_finish.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 
+            lib.rtc_session_request.restype = ctypes.c_void_p
+            lib.rtc_session_request.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
             lib.rtc_token_read_file.restype = ctypes.c_void_p
             lib.rtc_token_read_file.argtypes = [ctypes.c_char_p]
 
@@ -272,6 +275,43 @@ class RustTidalSession:
     def refresh_token(self) -> dict:
         """Returns the new PersistedToken JSON."""
         return self._call_session("rtc_session_refresh_token")
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        base_url: Optional[str] = None,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        json_body: Any = None,
+        form_body: bool = False,
+    ) -> dict:
+        """Generic authenticated HTTP. Returns {"ok", "status", "body"}.
+        4xx/5xx come back as ok=False with the parsed error body — callers
+        decide whether to bubble or retry. Transport / auth errors raise
+        RustTidalCoreError instead."""
+        args = {
+            "method": method,
+            "path": path,
+            "base_url": base_url,
+            "params": _scrub_params(params),
+            "headers": headers,
+            "json_body": json_body,
+            "form_body": bool(form_body),
+        }
+        return self._call_session_with_json("rtc_session_request", args)
+
+
+def _scrub_params(params: Optional[dict]) -> Optional[dict]:
+    if not params:
+        return None
+    out = {}
+    for k, v in params.items():
+        if v is None:
+            continue
+        out[str(k)] = v
+    return out or None
 
 
 _singleton: Optional[_RustTidalCore] = None

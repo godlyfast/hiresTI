@@ -5,9 +5,19 @@ use ureq::{Agent, AgentBuilder};
 
 use crate::error::{map_ureq, RtcError, RtcResult};
 
-/// Default user agent — kept similar to tidalapi-style ("requests" gets the
-/// same TIDAL responses we know parse cleanly).
-const DEFAULT_UA: &str = "TIDAL_ANDROID/2.38.0 okhttp/3.14.9";
+/// User agent matched to tidalapi 2025.7.16 — TIDAL endpoints are picky and
+/// some return 400/403 with the wrong UA, so keeping parity avoids drift.
+pub const DEFAULT_UA: &str = "Mozilla/5.0 (Linux; Android 12; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/91.0.4472.114 Safari/537.36";
+
+/// Tidal's `x-tidal-client-version` header tracks the client identity. tidalapi
+/// pins "2025.7.16"; we mirror it for compatibility with whatever endpoint
+/// validation is in place upstream.
+pub const TIDAL_CLIENT_VERSION: &str = "2025.7.16";
+
+/// Default API limit param tidalapi sends on every request. Some endpoints
+/// (e.g. home/feed/static) appear to validate its presence even though the
+/// docs don't require it.
+pub const DEFAULT_ITEM_LIMIT: i64 = 1000;
 
 pub fn build_agent(pool_size: usize) -> Agent {
     let pool = pool_size.max(8);

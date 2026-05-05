@@ -1544,14 +1544,16 @@ class TidalBackend:
         endpoint = "my-collection/playlists/folders/move"
         params = {"folderId": str(target_folder_id or "root"), "trns": trn}
         try:
-            res = self.session.request.request(
+            if self._rust_session is None:
+                raise RuntimeError("rust_tidal_core unavailable")
+            res = self._rust_session.request(
                 "PUT",
                 endpoint,
-                base_url=self.session.config.api_v2_location,
+                base_url="https://api.tidal.com/v2/",
                 params=params,
             )
             return {
-                "ok": bool(getattr(res, "ok", False)),
+                "ok": bool(res.get("ok", False)),
                 "playlist_id": pid or None,
                 "target_folder_id": str(target_folder_id or "root"),
             }
@@ -2082,24 +2084,26 @@ class TidalBackend:
             return None
 
     def _fetch_home_page_raw(self):
-        if not getattr(self, "session", None):
-            return {}
-        request_obj = getattr(self.session, "request", None)
-        config_obj = getattr(self.session, "config", None)
-        if request_obj is None or config_obj is None or not hasattr(request_obj, "request"):
+        if self._rust_session is None:
             return {}
 
         def _fetch():
-            return request_obj.request(
+            res = self._rust_session.request(
                 "GET",
                 "home/feed/static",
-                base_url=config_obj.api_v2_location,
+                base_url="https://api.tidal.com/v2/",
                 params={
                     "deviceType": "BROWSER",
                     "locale": getattr(self.session, "locale", None),
                     "platform": "WEB",
                 },
-            ).json()
+            )
+            if not res.get("ok"):
+                # Treat 4xx/5xx as an exception so session-recovery kicks in.
+                raise RuntimeError(
+                    f"home/feed/static returned {res.get('status')}: {res.get('body')}"
+                )
+            return res.get("body") or {}
 
         return self._call_with_session_recovery(_fetch, context="home page")
 
