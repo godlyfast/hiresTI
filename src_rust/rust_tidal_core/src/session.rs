@@ -326,6 +326,44 @@ impl Session {
         lists::mix_items(self, mix_id, args)
     }
 
+    // ----- Tail surfaces (Phase 6) -----
+    pub fn track_lyrics(&self, track_id: i64) -> RtcResult<crate::tail::Lyrics> {
+        crate::tail::track_lyrics(self, track_id)
+    }
+    pub fn track_radio(
+        &self,
+        track_id: i64,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<Track>> {
+        crate::tail::track_radio(self, track_id, args)
+    }
+    pub fn artist_top_tracks(
+        &self,
+        artist_id: i64,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<Track>> {
+        crate::tail::artist_top_tracks(self, artist_id, args)
+    }
+    pub fn artist_albums(
+        &self,
+        artist_id: i64,
+        kind: &str,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<Album>> {
+        let kind = crate::tail::ArtistAlbumKind::from_str(kind);
+        crate::tail::artist_albums(self, artist_id, kind, args)
+    }
+    pub fn artist_similar(
+        &self,
+        artist_id: i64,
+        args: &ListArgs,
+    ) -> RtcResult<PageResponse<Artist>> {
+        crate::tail::artist_similar(self, artist_id, args)
+    }
+    pub fn artist_bio(&self, artist_id: i64) -> RtcResult<crate::tail::Bio> {
+        crate::tail::artist_bio(self, artist_id)
+    }
+
     // ----- Stream + manifest (Phase 5) -----
     pub fn fetch_stream(
         &self,

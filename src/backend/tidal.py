@@ -2211,6 +2211,27 @@ class TidalBackend:
     def get_artist_top_tracks(self, art, limit=20, offset=0):
         page_size = max(1, int(limit or 20))
         page_offset = max(0, int(offset or 0))
+        artist_id = self._artist_id_or_none(art)
+
+        if self._rust_session is not None and artist_id is not None:
+            try:
+                page = self._rust_session.list(
+                    "artist_top_tracks",
+                    limit=page_size,
+                    offset=page_offset,
+                    id=artist_id,
+                )
+                items = (page or {}).get("items") or []
+                return [
+                    wrap_model(
+                        "track", t,
+                        tidalapi_session=self.session,
+                        rust_session=self._rust_session,
+                    )
+                    for t in items
+                ]
+            except RustTidalCoreError as e:
+                logger.debug("rust artist_top_tracks(%s) [%s]: %s", artist_id, e.kind, e)
 
         def _fetch():
             a = art
@@ -2235,6 +2256,17 @@ class TidalBackend:
                 e,
             )
             return []
+
+    def _artist_id_or_none(self, art):
+        if isinstance(art, (int, str)):
+            try:
+                return int(art)
+            except (TypeError, ValueError):
+                return None
+        try:
+            return int(getattr(art, "id", 0) or 0) or None
+        except (TypeError, ValueError):
+            return None
 
     def _get_artist_album_collection(self, art, method_name, limit=2000, page_size=100):
         target = max(0, int(limit or 0))
@@ -2288,13 +2320,83 @@ class TidalBackend:
         return list(self._call_with_session_recovery(_fetch, context=f"artist {method_name}") or [])
 
     def get_artist_albums_all(self, art, limit=2000):
+        out = self._rust_artist_albums(art, "artist_albums", limit=limit)
+        if out is not None:
+            return out
         try:
             return self._get_artist_album_collection(art, "get_albums", limit=limit, page_size=100)
         except Exception as e:
             logger.warning("Failed to fetch all albums for artist %s: %s", getattr(art, "id", "unknown"), e)
             return []
 
+    def _rust_artist_albums(self, art, kind, limit=2000):
+        """Phase 6 fast path: drain artist_albums / artist_ep_singles via the
+        Rust list dispatcher. Returns None if Rust isn't available so the
+        caller falls back to the tidalapi pagination loop."""
+        if self._rust_session is None:
+            return None
+        artist_id = self._artist_id_or_none(art)
+        if artist_id is None:
+            return None
+        target = max(0, int(limit or 0))
+        if target <= 0:
+            return []
+        page_size = min(100, target)
+        merged = []
+        seen = set()
+        offset = 0
+        try:
+            while len(merged) < target:
+                page = self._rust_session.list(
+                    kind, limit=page_size, offset=offset, id=artist_id,
+                )
+                items = (page or {}).get("items") or []
+                if not items:
+                    break
+                new_in_page = 0
+                for raw in items:
+                    aid = str(raw.get("id") or "") if isinstance(raw, dict) else ""
+                    if aid and aid in seen:
+                        continue
+                    if aid:
+                        seen.add(aid)
+                    merged.append(
+                        wrap_model(
+                            "album", raw,
+                            tidalapi_session=self.session,
+                            rust_session=self._rust_session,
+                        )
+                    )
+                    new_in_page += 1
+                if new_in_page == 0:
+                    break
+                offset += len(items)
+                if len(items) < page_size:
+                    break
+        except RustTidalCoreError as e:
+            logger.debug("rust %s(%s) [%s]: %s", kind, artist_id, e.kind, e)
+            return None
+        return merged[:target]
+
     def get_similar_artists(self, art):
+        artist_id = self._artist_id_or_none(art)
+        if self._rust_session is not None and artist_id is not None:
+            try:
+                page = self._rust_session.list(
+                    "artist_similar", limit=50, offset=0, id=artist_id,
+                )
+                items = (page or {}).get("items") or []
+                return [
+                    wrap_model(
+                        "artist", a,
+                        tidalapi_session=self.session,
+                        rust_session=self._rust_session,
+                    )
+                    for a in items
+                ]
+            except RustTidalCoreError as e:
+                logger.debug("rust artist_similar(%s) [%s]: %s", artist_id, e.kind, e)
+
         def _fetch():
             a = art
             if isinstance(a, (int, str)):
@@ -2309,6 +2411,9 @@ class TidalBackend:
             return []
 
     def get_artist_ep_singles_all(self, art, limit=2000):
+        out = self._rust_artist_albums(art, "artist_ep_singles", limit=limit)
+        if out is not None:
+            return out
         try:
             artist_obj = art
             if isinstance(artist_obj, (int, str)):
@@ -2325,6 +2430,27 @@ class TidalBackend:
 
     def get_albums_page(self, art, limit=50, offset=0):
         """Fetch one page of artist albums. Uses session recovery on transient errors."""
+        page_size = max(1, int(limit or 50))
+        page_offset = max(0, int(offset or 0))
+        artist_id = self._artist_id_or_none(art)
+        if self._rust_session is not None and artist_id is not None:
+            try:
+                page = self._rust_session.list(
+                    "artist_albums",
+                    limit=page_size, offset=page_offset, id=artist_id,
+                )
+                items = (page or {}).get("items") or []
+                return [
+                    wrap_model(
+                        "album", a,
+                        tidalapi_session=self.session,
+                        rust_session=self._rust_session,
+                    )
+                    for a in items
+                ]
+            except RustTidalCoreError as e:
+                logger.debug("rust artist_albums page(%s) [%s]: %s", artist_id, e.kind, e)
+
         def _fetch():
             a = art
             if isinstance(a, (int, str)):

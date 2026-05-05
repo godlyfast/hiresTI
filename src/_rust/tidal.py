@@ -166,6 +166,12 @@ class _RustTidalCore:
             lib.rtc_session_fetch_legacy_url.restype = ctypes.c_void_p
             lib.rtc_session_fetch_legacy_url.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 
+            lib.rtc_session_track_lyrics.restype = ctypes.c_void_p
+            lib.rtc_session_track_lyrics.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+
+            lib.rtc_session_artist_bio.restype = ctypes.c_void_p
+            lib.rtc_session_artist_bio.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+
             lib.rtc_token_read_file.restype = ctypes.c_void_p
             lib.rtc_token_read_file.argtypes = [ctypes.c_char_p]
 
@@ -469,6 +475,19 @@ class RustTidalSession:
         )
         return str(out.get("url") or "") if isinstance(out, dict) else ""
 
+    # ----- Lyrics + artist bio (Phase 6) -----
+    def track_lyrics(self, track_id: int) -> dict:
+        lib = self._core._require_lib()
+        return self._core._result_or_raise(
+            lib.rtc_session_track_lyrics(self._handle, ctypes.c_int64(int(track_id)))
+        )
+
+    def artist_bio(self, artist_id: int) -> dict:
+        lib = self._core._require_lib()
+        return self._core._result_or_raise(
+            lib.rtc_session_artist_bio(self._handle, ctypes.c_int64(int(artist_id)))
+        )
+
     def request(
         self,
         method: str,
@@ -715,11 +734,66 @@ def _drain_pages(rust_session, kind: str, *, page_size: int = 100, **list_kwargs
 
 class RustTrack(_RustModelBase):
     _tidalapi_factory = staticmethod(_make_track_proxy)
-    # Stream / lyrics are still served via tidalapi until Phase 5/6.
+    # Stream methods are served by Rust directly via TidalBackend now;
+    # the proxy fallback exists only for code paths that still touch
+    # full_track.get_url() when the .so isn't loaded.
     _PROXY_METHODS = frozenset({
         "get_url", "get_stream", "get_stream_manifest", "get_manifest_data",
-        "lyrics",
     })
+
+    def lyrics(self):
+        """Phase 6: Rust-native lyrics. Returns a small object with
+        `.text`, `.subtitles`, `.right_to_left`, `.lyrics_provider`. Falls
+        back to the tidalapi proxy if the Rust path errors (e.g. crate
+        not loaded), so existing call sites keep working unchanged."""
+        rust_session = self.__dict__.get("_rust_session")
+        tid = self._data.get("id")
+        if rust_session is None or not tid:
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return None
+            return proxy.lyrics()
+        try:
+            data = rust_session.track_lyrics(int(tid))
+        except RustTidalCoreError as e:
+            logger.debug("rust track_lyrics(%s) error [%s]: %s", tid, e.kind, e)
+            proxy = self._ensure_proxy()
+            if proxy is None:
+                return None
+            return proxy.lyrics()
+        return _LyricsView(data)
+
+
+class _LyricsView:
+    """Tidalapi-Lyrics-shaped read view over the Rust dict."""
+
+    __slots__ = ("_d",)
+
+    def __init__(self, data):
+        self._d = data or {}
+
+    @property
+    def text(self):
+        return self._d.get("text") or ""
+
+    @property
+    def subtitles(self):
+        return self._d.get("subtitles") or ""
+
+    @property
+    def right_to_left(self):
+        return bool(self._d.get("right_to_left"))
+
+    @property
+    def lyrics_provider(self):
+        return self._d.get("lyrics_provider") or ""
+
+    @property
+    def track_id(self):
+        return int(self._d.get("track_id") or 0)
+
+    def __bool__(self):
+        return bool(self._d.get("text") or self._d.get("subtitles"))
 
 
 class RustAlbum(_RustModelBase):

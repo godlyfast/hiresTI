@@ -16,6 +16,7 @@ mod models;
 mod request;
 mod session;
 mod stream;
+mod tail;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -546,6 +547,35 @@ pub unsafe extern "C" fn rtc_session_list(
                     .ok_or_else(|| RtcError::InvalidInput("mix_items needs id".into()))?;
                 serde_json::to_value(session.mix_items_list(&id, &list_args)?)?
             }
+            "track_radio" => {
+                let id = id_int
+                    .or_else(|| id_str.as_ref().and_then(|s| s.parse().ok()))
+                    .ok_or_else(|| RtcError::InvalidInput("track_radio needs numeric id".into()))?;
+                serde_json::to_value(session.track_radio(id, &list_args)?)?
+            }
+            "artist_top_tracks" => {
+                let id = id_int
+                    .or_else(|| id_str.as_ref().and_then(|s| s.parse().ok()))
+                    .ok_or_else(|| RtcError::InvalidInput("artist_top_tracks needs numeric id".into()))?;
+                serde_json::to_value(session.artist_top_tracks(id, &list_args)?)?
+            }
+            "artist_similar" => {
+                let id = id_int
+                    .or_else(|| id_str.as_ref().and_then(|s| s.parse().ok()))
+                    .ok_or_else(|| RtcError::InvalidInput("artist_similar needs numeric id".into()))?;
+                serde_json::to_value(session.artist_similar(id, &list_args)?)?
+            }
+            "artist_albums" | "artist_ep_singles" | "artist_compilations" => {
+                let id = id_int
+                    .or_else(|| id_str.as_ref().and_then(|s| s.parse().ok()))
+                    .ok_or_else(|| RtcError::InvalidInput("artist_albums needs numeric id".into()))?;
+                let kind_str = match kind.as_str() {
+                    "artist_ep_singles" => "ep_singles",
+                    "artist_compilations" => "compilations",
+                    _ => "all",
+                };
+                serde_json::to_value(session.artist_albums(id, kind_str, &list_args)?)?
+            }
             other => return Err(RtcError::InvalidInput(format!("unknown list kind: {}", other))),
         };
         Ok(value)
@@ -587,6 +617,34 @@ pub unsafe extern "C" fn rtc_session_request(
         let args: crate::request::RequestArgs = parse_json_input(args_json, "args_json")?;
         let resp = session.request(args)?;
         Ok(serde_json::to_value(resp)?)
+    })();
+    handle(result)
+}
+
+// ---------------------------------------------------------------------------
+// Tail surfaces (Phase 6) — lyrics, bio
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_track_lyrics(
+    handle_ptr: *mut Session,
+    track_id: i64,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        Ok(serde_json::to_value(session.track_lyrics(track_id)?)?)
+    })();
+    handle(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtc_session_artist_bio(
+    handle_ptr: *mut Session,
+    artist_id: i64,
+) -> *mut c_char {
+    let result = (|| -> RtcResult<serde_json::Value> {
+        let session = session_ref(handle_ptr)?;
+        Ok(serde_json::to_value(session.artist_bio(artist_id)?)?)
     })();
     handle(result)
 }
