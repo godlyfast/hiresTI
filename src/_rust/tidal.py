@@ -393,6 +393,12 @@ class RustTidalSession:
             {"path": str(path), "params": _scrub_params(params)},
         )
 
+    def page_get(self, path: str, params: Optional[dict] = None) -> "_PageView":
+        """Fetch a /pages/* endpoint and return a tidalapi.Page-shaped view
+        backed entirely by Rust HTTP + the Python normalizer below."""
+        raw = self.page_get_raw(path, params=params)
+        return _PageView(raw, rust_session=self)
+
     # ----- Favorites + listings (Phase 4) -----
     def favorites_add(self, kind: str, item_id: Any) -> bool:
         lib = self._core._require_lib()
@@ -847,6 +853,240 @@ def wrap_model(kind: str, data: dict, rust_session=None):
     if cls is None:
         return data
     return cls(data, rust_session=rust_session)
+
+
+# ---------------------------------------------------------------------
+# Page view wrappers. TIDAL's /pages/* responses come in two shapes:
+#   V1: { "title": ..., "rows": [ { "modules": [ <module>, ... ] }, ... ] }
+#   V2: { "title": ..., "items": [ <category>, ... ] }
+# tidalapi.Page normalizes both into `.categories[]` where each category
+# exposes title / subtitle / description / items / _more. We mirror just
+# enough of that surface for the call sites we have.
+#
+# Items inside a category can be:
+#   - model dicts (track / album / artist / playlist / mix / video) — wrapped
+#     via wrap_model so callers see RustTrack/RustAlbum/... shapes
+#   - PageItem-style cards (header / shortHeader / imageId / type)
+#   - PageLink-style links (title / apiPath / imageId)
+# We pick which form via the keys present on the JSON dict.
+# ---------------------------------------------------------------------
+
+
+class _PageItem:
+    """PageItem/PageLink-shaped read view. Matches tidalapi.PageItem fields
+    that the backend already probes (header / short_header / image_id /
+    type / api_path / title)."""
+
+    __slots__ = ("_d",)
+
+    def __init__(self, data: dict) -> None:
+        self._d = data or {}
+
+    def __getattr__(self, name: str):
+        d = object.__getattribute__(self, "_d")
+        camel = {
+            "image_id": "imageId",
+            "short_header": "shortHeader",
+            "short_sub_header": "shortSubHeader",
+            "api_path": "apiPath",
+            "artifact_id": "artifactId",
+        }.get(name, name)
+        for key in (name, camel):
+            if key in d:
+                return d[key]
+        raise AttributeError(
+            f"_PageItem has no attribute {name!r} (json keys: {sorted(d)})"
+        )
+
+    def to_dict(self) -> dict:
+        return dict(self._d)
+
+
+class _More:
+    __slots__ = ("api_path", "title")
+
+    def __init__(self, api_path: str, title: Optional[str]) -> None:
+        self.api_path = api_path
+        self.title = title
+
+    @classmethod
+    def parse(cls, json_obj: dict) -> Optional["_More"]:
+        show_more = json_obj.get("showMore")
+        view_all = json_obj.get("viewAll")
+        if isinstance(show_more, dict) and show_more.get("apiPath"):
+            return cls(api_path=show_more["apiPath"], title=show_more.get("title"))
+        if isinstance(view_all, str) and view_all:
+            return cls(api_path=view_all, title=json_obj.get("title"))
+        return None
+
+
+class _PageCategory:
+    """tidalapi.PageCategory-shaped view over a single TIDAL page module."""
+
+    __slots__ = ("_raw", "_rust_session", "title", "subtitle", "description",
+                 "type", "_more", "_items_cache")
+
+    def __init__(self, raw: dict, rust_session=None) -> None:
+        self._raw = raw or {}
+        self._rust_session = rust_session
+        self.title = self._raw.get("title")
+        self.subtitle = self._raw.get("subtitle")
+        self.description = self._raw.get("description") or self.title
+        self.type = self._raw.get("type")
+        self._more = _More.parse(self._raw)
+        self._items_cache: Optional[list] = None
+
+    @property
+    def subTitle(self):
+        return self.subtitle
+
+    @property
+    def items(self) -> list:
+        if self._items_cache is not None:
+            return self._items_cache
+        self._items_cache = self._build_items()
+        return self._items_cache
+
+    def _build_items(self) -> list:
+        raw = self._raw
+        cat_type = (raw.get("type") or "").upper()
+
+        # MIX_HEADER / ARTIST_HEADER / ALBUM_HEADER: single-item header.
+        if cat_type == "MIX_HEADER" and isinstance(raw.get("mix"), dict):
+            return [wrap_model("mix", raw["mix"], rust_session=self._rust_session)]
+        if cat_type == "ARTIST_HEADER" and isinstance(raw.get("artist"), dict):
+            return [wrap_model("artist", raw["artist"], rust_session=self._rust_session)]
+        if cat_type == "ALBUM_HEADER" and isinstance(raw.get("album"), dict):
+            return [wrap_model("album", raw["album"], rust_session=self._rust_session)]
+
+        # V2 typed items: top-level "items" with each carrying { type, data }.
+        v2_items = raw.get("items")
+        if isinstance(v2_items, list) and any(
+            isinstance(it, dict) and "data" in it for it in v2_items
+        ):
+            return [self._wrap_v2_item(it) for it in v2_items if it is not None]
+
+        # V1: pagedList holds the items.
+        paged = raw.get("pagedList")
+        if isinstance(paged, dict):
+            inner = paged.get("items") or []
+        else:
+            inner = []
+
+        # FEATURED_PROMOTIONS / MULTIPLE_TOP_PROMOTIONS: items are PageItem cards.
+        if cat_type in ("FEATURED_PROMOTIONS", "MULTIPLE_TOP_PROMOTIONS"):
+            return [_PageItem(it) for it in (raw.get("items") or []) if it]
+
+        # PAGE_LINKS / PAGE_LINKS_CLOUD: pagedList items are PageLink cards.
+        if cat_type in ("PAGE_LINKS", "PAGE_LINKS_CLOUD"):
+            return [_PageItem(it) for it in inner if it]
+
+        # ARTICLE_LIST / SOCIAL: tidalapi rewires these into LinkList shapes.
+        if cat_type == "ARTICLE_LIST":
+            return [_PageItem(it) for it in inner if it]
+        if cat_type == "SOCIAL":
+            return [_PageItem(it) for it in (raw.get("socialProfiles") or []) if it]
+
+        # ITEM_LIST_WITH_ROLES: each item wraps an inner item + roles.
+        if cat_type == "ITEM_LIST_WITH_ROLES":
+            out = []
+            for entry in inner:
+                if not isinstance(entry, dict):
+                    continue
+                inner_item = entry.get("item")
+                if isinstance(inner_item, dict):
+                    inner_item = dict(inner_item)
+                    inner_item["artistRoles"] = entry.get("roles")
+                    out.append(self._wrap_typed("track", inner_item))
+            return out
+
+        # HIGHLIGHT_MODULE: items live under "highlights[].item".
+        if cat_type == "HIGHLIGHT_MODULE":
+            return [
+                self._wrap_v2_item({"data": h.get("item"), "type": (h.get("item") or {}).get("type")})
+                for h in (raw.get("highlights") or [])
+                if isinstance(h, dict) and h.get("item")
+            ]
+
+        # MIXED_TYPES_LIST: each item is { type, ... } where type names a model.
+        if cat_type in ("MIXED_TYPES_LIST", "ALBUM_ITEMS"):
+            return [self._wrap_v2_item(it) for it in inner if isinstance(it, dict)]
+
+        # The common ITEM_LIST family: TRACK_LIST / ALBUM_LIST / ARTIST_LIST /
+        # PLAYLIST_LIST / VIDEO_LIST / MIX_LIST. Items are model dicts.
+        kind_map = {
+            "TRACK_LIST": "track",
+            "ALBUM_LIST": "album",
+            "ARTIST_LIST": "artist",
+            "PLAYLIST_LIST": "playlist",
+            "VIDEO_LIST": "video",
+            "MIX_LIST": "mix",
+        }
+        kind = kind_map.get(cat_type)
+        if kind:
+            return [self._wrap_typed(kind, it) for it in inner if isinstance(it, dict)]
+
+        # Fallback: surface raw items as _PageItem so attribute probes still work.
+        return [_PageItem(it) for it in inner if isinstance(it, dict)]
+
+    def _wrap_typed(self, kind: str, data: dict):
+        if not isinstance(data, dict):
+            return None
+        return wrap_model(kind, data, rust_session=self._rust_session)
+
+    def _wrap_v2_item(self, entry: dict):
+        # V2 entry: { "type": "TRACK"|"ALBUM"|..., "data": {...} } or directly
+        # a typed dict where "type" is the kind tag.
+        if not isinstance(entry, dict):
+            return None
+        item_type = (entry.get("type") or "").upper()
+        data = entry.get("data") if "data" in entry else entry
+        if not isinstance(data, dict):
+            return None
+        kind_map = {
+            "TRACK": "track",
+            "ALBUM": "album",
+            "ARTIST": "artist",
+            "PLAYLIST": "playlist",
+            "VIDEO": "video",
+            "MIX": "mix",
+        }
+        kind = kind_map.get(item_type)
+        if kind:
+            return self._wrap_typed(kind, data)
+        return _PageItem(data)
+
+
+class _PageView:
+    """tidalapi.Page-shaped view over the raw page_get_raw() JSON."""
+
+    __slots__ = ("_raw", "_rust_session", "title", "categories")
+
+    def __init__(self, raw: dict, rust_session=None) -> None:
+        self._raw = raw or {}
+        self._rust_session = rust_session
+        self.title = self._raw.get("title")
+        self.categories = self._build_categories()
+
+    def _build_categories(self) -> list:
+        raw = self._raw
+        rows = raw.get("rows")
+        if isinstance(rows, list) and rows:
+            cats: list = []
+            for row in rows:
+                modules = (row or {}).get("modules") if isinstance(row, dict) else None
+                if not modules:
+                    continue
+                # tidalapi only takes modules[0] per row.
+                cats.append(_PageCategory(modules[0] or {}, rust_session=self._rust_session))
+            return cats
+        items = raw.get("items")
+        if isinstance(items, list):
+            return [_PageCategory(it or {}, rust_session=self._rust_session) for it in items]
+        return []
+
+    def to_dict(self) -> dict:
+        return dict(self._raw)
 
 
 _singleton: Optional[_RustTidalCore] = None

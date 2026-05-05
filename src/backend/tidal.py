@@ -650,6 +650,18 @@ class TidalBackend:
         parsed = self._rust_core.parse_model(kind, data)
         return wrap_model(kind, parsed, rust_session=self._rust_session)
 
+    def _rust_page_get(self, path, params=None):
+        """Authoritative /pages/* fetch. Returns a _PageView with the same
+        attribute surface tidalapi.Page exposed (categories / title /
+        category.items / category._more). Cold-start falls back to
+        self.session.page.get() so users without the .so still see something."""
+        if self._rust_session is None:
+            sess_page = getattr(self.session, "page", None) if self.session else None
+            if sess_page is None:
+                return None
+            return sess_page.get(path, params=dict(params) if params else None)
+        return self._rust_session.page_get(path, params=params)
+
     def _serialize_expiry(self, value):
         if hasattr(value, "isoformat"):
             return value.isoformat()
@@ -2656,12 +2668,14 @@ class TidalBackend:
             items = list(getattr(category, "items", None) or [])
             more = getattr(category, "_more", None)
             more_path = _norm_path(getattr(more, "api_path", None) if more is not None else None)
-            if not more_path or not hasattr(self.session, "page") or self.session.page is None:
+            if not more_path:
                 return items
             try:
-                more_page = self.session.page.get(more_path, params={"deviceType": "BROWSER"})
+                more_page = self._rust_page_get(more_path)
             except Exception as e:
                 logger.debug("Top category view-all fetch failed for %s: %s", more_path, e)
+                return items
+            if more_page is None:
                 return items
 
             merged = list(items)
@@ -2715,9 +2729,6 @@ class TidalBackend:
             return None
 
         try:
-            if not hasattr(self.session, "page") or self.session.page is None:
-                return sections
-
             queue = ["pages/explore_top_music"]
             while queue:
                 path = _norm_path(queue.pop(0))
@@ -2726,9 +2737,11 @@ class TidalBackend:
                 seen_paths.add(path)
 
                 try:
-                    page_obj = self.session.page.get(path, params={"deviceType": "BROWSER"})
+                    page_obj = self._rust_page_get(path)
                 except Exception as e:
                     logger.debug("Top page fetch failed for %s: %s", path, e)
+                    continue
+                if page_obj is None:
                     continue
 
                 categories = list(getattr(page_obj, "categories", None) or [])
@@ -2785,12 +2798,14 @@ class TidalBackend:
             items = list(getattr(category, "items", None) or [])
             more = getattr(category, "_more", None)
             more_path = _norm_path(getattr(more, "api_path", None) if more is not None else None)
-            if not more_path or not hasattr(self.session, "page") or self.session.page is None:
+            if not more_path:
                 return items
             try:
-                more_page = self.session.page.get(more_path, params={"deviceType": "BROWSER"})
+                more_page = self._rust_page_get(more_path)
             except Exception as e:
                 logger.debug("New category view-all fetch failed for %s: %s", more_path, e)
+                return items
+            if more_page is None:
                 return items
 
             merged = list(items)
@@ -2880,9 +2895,6 @@ class TidalBackend:
                 out.append(it)
             return out
         try:
-            if not hasattr(self.session, "page") or self.session.page is None:
-                return sections
-
             queue = ["pages/explore_new_music"]
             while queue:
                 path = _norm_path(queue.pop(0))
@@ -2891,9 +2903,11 @@ class TidalBackend:
                 seen_paths.add(path)
 
                 try:
-                    page_obj = self.session.page.get(path, params={"deviceType": "BROWSER"})
+                    page_obj = self._rust_page_get(path)
                 except Exception as e:
                     logger.debug("New page fetch failed for %s: %s", path, e)
+                    continue
+                if page_obj is None:
                     continue
 
                 categories = list(getattr(page_obj, "categories", None) or [])
@@ -3005,7 +3019,9 @@ class TidalBackend:
         def _fetch_decade(label, path):
             """Fetch one decade page; preserve each category as a sub-section."""
             try:
-                page_obj = self.session.page.get(path, params={"deviceType": "BROWSER"})
+                page_obj = self._rust_page_get(path)
+                if page_obj is None:
+                    return None
                 categories = []
                 seen_cat_titles = set()
                 for category in list(getattr(page_obj, "categories", None) or []):
@@ -3030,7 +3046,7 @@ class TidalBackend:
                 logger.debug("Decades: failed to fetch %s (%s): %s", label, path, e)
             return None
 
-        if not hasattr(self.session, "page") or self.session.page is None:
+        if self._rust_session is None and (self.session is None or getattr(self.session, "page", None) is None):
             return [], []
 
         # Return the decade definitions and only the first decade's content eagerly.
@@ -3106,7 +3122,7 @@ class TidalBackend:
             return out
 
         try:
-            page_obj = self.session.page.get(path, params={"deviceType": "BROWSER"})
+            page_obj = self._rust_page_get(path)
             categories = []
             seen_cat_titles = set()
             for category in list(getattr(page_obj, "categories", None) or []):
@@ -3145,14 +3161,9 @@ class TidalBackend:
         seen = set()
 
         try:
-            if not hasattr(self.session, "page") or self.session.page is None:
+            page_obj = self._rust_page_get("pages/genre_page")
+            if page_obj is None:
                 return [], []
-
-            page_fetch = getattr(self.session, "genres", None)
-            if callable(page_fetch):
-                page_obj = page_fetch()
-            else:
-                page_obj = self.session.page.get("pages/genre_page", params={"deviceType": "BROWSER"})
 
             for category in list(getattr(page_obj, "categories", None) or []):
                 for item in list(getattr(category, "items", None) or []):
@@ -3195,10 +3206,9 @@ class TidalBackend:
         seen = set()
 
         try:
-            if not hasattr(self.session, "page") or self.session.page is None:
+            page_obj = self._rust_page_get("pages/moods_page")
+            if page_obj is None:
                 return [], []
-
-            page_obj = self.session.page.get("pages/moods_page", params={"deviceType": "BROWSER"})
 
             for category in list(getattr(page_obj, "categories", None) or []):
                 for item in list(getattr(category, "items", None) or []):
@@ -3335,10 +3345,12 @@ class TidalBackend:
 
         try:
             genre_path = _norm_path(path)
-            if not genre_path or not hasattr(self.session, "page") or self.session.page is None:
+            if not genre_path:
                 return None
 
-            page_obj = self.session.page.get(genre_path, params={"deviceType": "BROWSER"})
+            page_obj = self._rust_page_get(genre_path)
+            if page_obj is None:
+                return None
             categories = []
             seen_cat_titles = set()
             for cat_idx, category in enumerate(list(getattr(page_obj, "categories", None) or [])):
@@ -3418,9 +3430,11 @@ class TidalBackend:
 
         try:
             norm = _norm(more_path)
-            if not norm or not hasattr(self.session, "page") or self.session.page is None:
+            if not norm:
                 return []
-            more_page = self.session.page.get(norm, params={"deviceType": "BROWSER"})
+            more_page = self._rust_page_get(norm)
+            if more_page is None:
+                return []
             result, seen = [], set()
             for sub_cat in list(getattr(more_page, "categories", None) or []):
                 for raw_item in list(getattr(sub_cat, "items", None) or []):
@@ -3463,14 +3477,15 @@ class TidalBackend:
             items = list(getattr(category, "items", None) or [])
             more = getattr(category, "_more", None)
             more_path = _norm_path(getattr(more, "api_path", None) if more is not None else None)
-            if not more_path or not hasattr(self.session, "page") or self.session.page is None:
+            if not more_path:
                 return items
             try:
-                more_page = self.session.page.get(more_path, params={"deviceType": "BROWSER"})
-                for sub_cat in list(getattr(more_page, "categories", None) or []):
-                    sub_items = list(getattr(sub_cat, "items", None) or [])
-                    if sub_items:
-                        items.extend(sub_items)
+                more_page = self._rust_page_get(more_path)
+                if more_page is not None:
+                    for sub_cat in list(getattr(more_page, "categories", None) or []):
+                        sub_items = list(getattr(sub_cat, "items", None) or [])
+                        if sub_items:
+                            items.extend(sub_items)
             except Exception as e:
                 logger.debug("Hi-Res category view-all fetch failed for %s: %s", more_path, e)
             return items
@@ -3529,9 +3544,9 @@ class TidalBackend:
         sections = []
         seen_titles = set()
         try:
-            if not hasattr(self.session, "page") or self.session.page is None:
+            page_obj = self._rust_page_get("pages/hires")
+            if page_obj is None:
                 return sections
-            page_obj = self.session.page.get("pages/hires", params={"deviceType": "BROWSER"})
             for category in list(getattr(page_obj, "categories", None) or []):
                 _ct = getattr(category, "title", "")
                 title = (str(_ct) if _ct is not None and not callable(_ct) else "").strip() or "Hi-Res"
