@@ -8,13 +8,22 @@
 //!   error label, empty-state label) so views don't reinvent the
 //!   styling.
 
+use std::rc::Rc;
+
 use relm4::gtk::{
-    self, prelude::*, Box as GtkBox, Label, ListBoxRow, Orientation, Spinner,
+    self, prelude::*, Box as GtkBox, FlowBox, FlowBoxChild, Image, Label, ListBoxRow,
+    Orientation, Spinner,
 };
 
-use rust_tidal_core::api::{Album, ArtistRef, Track};
+use rust_tidal_core::api::{Album, ArtistRef, PageCategory, PageItem, Track};
 
 use crate::state::playback::PlaybackSource;
+
+/// Type alias for the click-dispatch callback library/discovery views
+/// pass to the page-rendering helpers. Owned + reference-counted so a
+/// single callback can be cloned across every card without forcing the
+/// caller to construct a fresh closure per card.
+pub type CategoryOpener = Rc<dyn Fn(LibraryViewOutput) + 'static>;
 
 #[derive(Debug, Clone, Default)]
 pub enum ViewLoadState {
@@ -204,6 +213,216 @@ where
 
     row.connect_activate(move |_| on_play());
     row
+}
+
+/// Render a single `/pages/*` category as a section: title + subtitle +
+/// horizontal flow of item cards. Each card click dispatches via the
+/// shared `on_open` callback. Empty categories render a single
+/// "(no items)" label so the layout doesn't collapse.
+pub fn build_page_category_section(
+    category: &PageCategory,
+    on_open: CategoryOpener,
+) -> GtkBox {
+    let section = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
+        .build();
+
+    if let Some(title) = category.title.as_deref().filter(|s| !s.is_empty()) {
+        let title_label = Label::builder()
+            .label(title)
+            .xalign(0.0)
+            .css_classes(["title-3"])
+            .build();
+        section.append(&title_label);
+    }
+    if let Some(subtitle) = category.subtitle.as_deref().filter(|s| !s.is_empty()) {
+        let sub = Label::builder()
+            .label(subtitle)
+            .xalign(0.0)
+            .css_classes(["dim-label", "caption"])
+            .build();
+        section.append(&sub);
+    }
+
+    if category.items.is_empty() {
+        let empty = Label::builder()
+            .label("(no items)")
+            .xalign(0.0)
+            .css_classes(["dim-label"])
+            .build();
+        section.append(&empty);
+        return section;
+    }
+
+    let flow = FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .max_children_per_line(8)
+        .min_children_per_line(2)
+        .row_spacing(12)
+        .column_spacing(12)
+        .homogeneous(true)
+        .build();
+    for item in &category.items {
+        if let Some(card) = build_page_item_card(item, on_open.clone()) {
+            let child = FlowBoxChild::builder().child(&card).build();
+            flow.append(&child);
+        }
+    }
+    section.append(&flow);
+    section
+}
+
+/// Render a single `PageItem` as a clickable card. Returns `None` for
+/// item types we intentionally skip in discovery surfaces (videos in
+/// Phase 7). The cover slot is a placeholder icon — Phase 7-I swaps it
+/// for the real resources.tidal.com fetch.
+pub fn build_page_item_card(item: &PageItem, on_open: CategoryOpener) -> Option<GtkBox> {
+    let card = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(4)
+        .css_classes(["album-card"])
+        .build();
+
+    let cover = Image::builder()
+        .icon_name("audio-x-generic-symbolic")
+        .pixel_size(160)
+        .css_classes(["album-cover-img"])
+        .build();
+    card.append(&cover);
+
+    let (primary, secondary, click_output): (String, String, Option<LibraryViewOutput>) = match item {
+        PageItem::Track(t) => {
+            let title = if t.name.is_empty() {
+                "Unknown".to_string()
+            } else {
+                t.name.clone()
+            };
+            let artist = primary_artist_name(t.artist.as_ref(), &t.artists);
+            (
+                title,
+                artist,
+                Some(LibraryViewOutput::PlayTrack { track_id: t.id }),
+            )
+        }
+        PageItem::Album(a) => {
+            let title = if a.name.is_empty() {
+                "Unknown".to_string()
+            } else {
+                a.name.clone()
+            };
+            let artist = album_artist_name(a);
+            (
+                title.clone(),
+                artist,
+                Some(LibraryViewOutput::OpenAlbum {
+                    id: a.id.to_string(),
+                    title,
+                }),
+            )
+        }
+        PageItem::Artist(a) => {
+            let name = if a.name.is_empty() {
+                "Unknown".to_string()
+            } else {
+                a.name.clone()
+            };
+            (
+                name.clone(),
+                String::new(),
+                Some(LibraryViewOutput::OpenArtist {
+                    id: a.id.to_string(),
+                    name,
+                }),
+            )
+        }
+        PageItem::Playlist(p) => {
+            let title = if p.name.is_empty() {
+                "Untitled playlist".to_string()
+            } else {
+                p.name.clone()
+            };
+            let count = p
+                .num_tracks
+                .filter(|n| *n > 0)
+                .map(|n| format!("{n} tracks"))
+                .unwrap_or_default();
+            (
+                title.clone(),
+                count,
+                Some(LibraryViewOutput::OpenPlaylist {
+                    uuid: p.id.clone(),
+                    title,
+                }),
+            )
+        }
+        PageItem::Mix(m) => {
+            let title = if m.title.is_empty() {
+                "Mix".to_string()
+            } else {
+                m.title.clone()
+            };
+            let sub = m.sub_title.clone().unwrap_or_default();
+            (
+                title.clone(),
+                sub,
+                Some(LibraryViewOutput::OpenMix {
+                    id: m.id.clone(),
+                    title,
+                }),
+            )
+        }
+        PageItem::Video(_) => return None,
+        PageItem::Card(c) => {
+            let title = c
+                .header
+                .clone()
+                .or_else(|| c.short_header.clone())
+                .or_else(|| c.title.clone())
+                .unwrap_or_else(|| "—".to_string());
+            let sub = c
+                .short_sub_header
+                .clone()
+                .or_else(|| c.sub_title.clone())
+                .unwrap_or_default();
+            // PageLink/promo cards have no typed action yet — Phase 7-G
+            // adds a link router.
+            (title, sub, None)
+        }
+    };
+
+    let title_label = Label::builder()
+        .label(&primary)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(18)
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
+    card.append(&title_label);
+
+    if !secondary.is_empty() {
+        let sub_label = Label::builder()
+            .label(&secondary)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .max_width_chars(18)
+            .xalign(0.0)
+            .css_classes(["dim-label", "caption"])
+            .build();
+        card.append(&sub_label);
+    }
+
+    if let Some(out) = click_output {
+        let click = gtk::GestureClick::new();
+        let cb = on_open.clone();
+        click.connect_pressed(move |_, n_press, _, _| {
+            if n_press == 1 {
+                cb(out.clone());
+            }
+        });
+        card.add_controller(click);
+    }
+
+    Some(card)
 }
 
 /// Centered error message + (later) retry button.

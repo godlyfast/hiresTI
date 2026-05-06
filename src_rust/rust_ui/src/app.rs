@@ -44,6 +44,9 @@ use crate::components::views::mix_detail::{MixDetailInit, MixDetailViewModel};
 use crate::components::views::mixes::{MixesViewInput, MixesViewModel};
 use crate::components::views::playlist_detail::{PlaylistDetailInit, PlaylistDetailViewModel};
 use crate::components::views::playlists::{PlaylistsViewInput, PlaylistsViewModel};
+use crate::components::views::tabbed_discovery::{
+    TabSource, TabbedDiscoveryInit, TabbedDiscoveryInput, TabbedDiscoveryViewModel,
+};
 use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
@@ -87,6 +90,9 @@ pub struct AppController {
     new_view: Controller<DiscoveryViewModel>,
     top_view: Controller<DiscoveryViewModel>,
     hires_view: Controller<DiscoveryViewModel>,
+    genres_view: Controller<TabbedDiscoveryViewModel>,
+    decades_view: Controller<TabbedDiscoveryViewModel>,
+    moods_view: Controller<TabbedDiscoveryViewModel>,
 
     /// Currently displayed detail page, if any. Replacing the variant
     /// drops the previous Controller (and its widget — ContentStack
@@ -224,6 +230,36 @@ impl SimpleComponent for AppController {
             })
             .forward(sender.input_sender(), lib_forward);
 
+        let genres_view = TabbedDiscoveryViewModel::builder()
+            .launch(TabbedDiscoveryInit {
+                session: session.clone(),
+                source: TabSource::Definitions("pages/genre_page".into()),
+                empty_message: "TIDAL didn't return any genre tabs.",
+            })
+            .forward(sender.input_sender(), lib_forward);
+        let decades_view = TabbedDiscoveryViewModel::builder()
+            .launch(TabbedDiscoveryInit {
+                session: session.clone(),
+                source: TabSource::Static(vec![
+                    ("1950s".into(), "pages/m_1950s".into()),
+                    ("1960s".into(), "pages/m_1960s".into()),
+                    ("1970s".into(), "pages/m_1970s".into()),
+                    ("1980s".into(), "pages/m_1980s".into()),
+                    ("1990s".into(), "pages/m_1990s".into()),
+                    ("2000s".into(), "pages/m_2000s".into()),
+                    ("2010s".into(), "pages/m_2010s".into()),
+                ]),
+                empty_message: "No decade pages available.",
+            })
+            .forward(sender.input_sender(), lib_forward);
+        let moods_view = TabbedDiscoveryViewModel::builder()
+            .launch(TabbedDiscoveryInit {
+                session: session.clone(),
+                source: TabSource::Definitions("pages/moods_page".into()),
+                empty_message: "TIDAL didn't return any mood tabs.",
+            })
+            .forward(sender.input_sender(), lib_forward);
+
         let content = ContentStackModel::builder()
             .launch(ContentStackInit {
                 current: init.current_nav,
@@ -232,6 +268,9 @@ impl SimpleComponent for AppController {
                     (NavTarget::New, new_view.widget().clone().into()),
                     (NavTarget::Top, top_view.widget().clone().into()),
                     (NavTarget::HiRes, hires_view.widget().clone().into()),
+                    (NavTarget::Genres, genres_view.widget().clone().into()),
+                    (NavTarget::Decades, decades_view.widget().clone().into()),
+                    (NavTarget::Moods, moods_view.widget().clone().into()),
                     (NavTarget::Albums, albums_view.widget().clone().into()),
                     (NavTarget::Tracks, tracks_view.widget().clone().into()),
                     (NavTarget::Artists, artists_view.widget().clone().into()),
@@ -362,6 +401,9 @@ impl SimpleComponent for AppController {
             new_view,
             top_view,
             hires_view,
+            genres_view,
+            decades_view,
+            moods_view,
             detail: None,
             play_request_counter: 0,
             engine,
@@ -673,9 +715,24 @@ impl AppController {
             NavTarget::HiRes => {
                 self.hires_view.sender().send(DiscoveryViewInput::Refresh).ok();
             }
-            // Tab-style discovery surfaces (Genres / Decades / Moods)
-            // need their own component shape — Phase 6.5.
-            NavTarget::Genres | NavTarget::Decades | NavTarget::Moods => {}
+            NavTarget::Genres => {
+                self.genres_view
+                    .sender()
+                    .send(TabbedDiscoveryInput::Refresh)
+                    .ok();
+            }
+            NavTarget::Decades => {
+                self.decades_view
+                    .sender()
+                    .send(TabbedDiscoveryInput::Refresh)
+                    .ok();
+            }
+            NavTarget::Moods => {
+                self.moods_view
+                    .sender()
+                    .send(TabbedDiscoveryInput::Refresh)
+                    .ok();
+            }
         }
     }
 

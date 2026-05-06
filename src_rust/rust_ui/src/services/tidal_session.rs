@@ -318,6 +318,46 @@ impl TidalSessionService {
         self.session.fetch_page(path, None)
     }
 
+    /// Fetch a tab-definition page (e.g. `pages/genre_page`,
+    /// `pages/moods_page`) and flatten the categories' items into a
+    /// list of `(label, api_path)` tab entries. Mirrors the Python
+    /// `get_genres_page` / `get_moods_page` definition extraction —
+    /// the categories' types are PAGE_LINKS-flavored, so each item is
+    /// a Card with title + api_path.
+    pub fn fetch_tab_definitions_blocking(
+        &self,
+        path: &str,
+    ) -> Result<Vec<(String, String)>, RtcError> {
+        let page = self.session.fetch_page(path, None)?;
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for cat in page.categories {
+            for item in cat.items {
+                if let rust_tidal_core::api::PageItem::Card(c) = item {
+                    let label = c
+                        .title
+                        .or(c.header)
+                        .or(c.short_header)
+                        .unwrap_or_default();
+                    let api_path = c.api_path.unwrap_or_default();
+                    let api_path = api_path
+                        .strip_prefix('/')
+                        .map(str::to_string)
+                        .unwrap_or(api_path);
+                    if label.is_empty() || api_path.is_empty() {
+                        continue;
+                    }
+                    let key = (label.to_ascii_lowercase(), api_path.clone());
+                    if seen.insert(key) {
+                        out.push((label, api_path));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Read the user-profile fields from `/v1/users/{id}` and merge with
     /// the `UserInfo` we already have. Mirrors the Python
     /// `_build_user_view` helper introduced in commit a0ef6b71.

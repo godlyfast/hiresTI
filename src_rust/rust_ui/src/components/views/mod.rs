@@ -15,4 +15,5 @@ pub mod mix_detail;
 pub mod mixes;
 pub mod playlist_detail;
 pub mod playlists;
+pub mod tabbed_discovery;
 pub mod tracks;

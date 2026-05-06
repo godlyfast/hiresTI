@@ -1,21 +1,20 @@
 //! Shared discovery page view. Renders a vertical scroll of category
 //! sections — each section title + a horizontal flow of cards/rows —
 //! by walking the Page returned by rust_tidal_core's pages parser.
-//! Used by Home, New, Top, and Hi-Res. Genres / Decades / Moods are
-//! tab-style and share enough structure to drop in here later, but
-//! Phase 6 leaves them as placeholders.
+//! Used by Home, New, Top, and Hi-Res. Genres / Decades / Moods use
+//! the tabbed flavor in `tabbed_discovery.rs`.
 
-use relm4::gtk::{
-    self, prelude::*, Box as GtkBox, FlowBox, FlowBoxChild, Image, Label, Orientation,
-    ScrolledWindow, Separator,
-};
+use std::rc::Rc;
+
+use relm4::gtk::{self, Box as GtkBox, Orientation, ScrolledWindow, Separator};
+use relm4::gtk::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
-use rust_tidal_core::api::{Page, PageCategory, PageItem};
+use rust_tidal_core::api::Page;
 
 use crate::components::views::common::{
-    build_empty_widget, build_error_widget, build_loading_widget, LibraryViewOutput,
-    ViewLoadState,
+    build_empty_widget, build_error_widget, build_loading_widget, build_page_category_section,
+    LibraryViewOutput, ViewLoadState,
 };
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
 
@@ -48,17 +47,13 @@ pub enum DiscoveryViewInput {
     Refresh,
     FetchResult { token: u64, page: Page },
     FetchFailed { token: u64, error: String },
-    OpenAlbum { id: i64, title: String },
-    OpenArtist { id: i64, name: String },
-    OpenPlaylist { id: String, title: String },
-    OpenMix { id: String, title: String },
-    PlayTrack { id: i64 },
+    /// Card click from the rendering helpers — forwarded straight to
+    /// the parent via the component's Output sender.
+    Forward(LibraryViewOutput),
 }
 
 pub struct DiscoveryViewWidgets {
     root: ScrolledWindow,
-    /// The vertical Box that holds each rendered category section. Lives
-    /// inside `root` when the view is in Loaded state.
     body: GtkBox,
 }
 
@@ -156,26 +151,8 @@ impl SimpleComponent for DiscoveryViewModel {
                 tracing::warn!(error = %error, "discovery page fetch failed");
                 self.state = ViewLoadState::Failed(error);
             }
-            DiscoveryViewInput::OpenAlbum { id, title } => {
-                let _ = sender.output(LibraryViewOutput::OpenAlbum {
-                    id: id.to_string(),
-                    title,
-                });
-            }
-            DiscoveryViewInput::OpenArtist { id, name } => {
-                let _ = sender.output(LibraryViewOutput::OpenArtist {
-                    id: id.to_string(),
-                    name,
-                });
-            }
-            DiscoveryViewInput::OpenPlaylist { id, title } => {
-                let _ = sender.output(LibraryViewOutput::OpenPlaylist { uuid: id, title });
-            }
-            DiscoveryViewInput::OpenMix { id, title } => {
-                let _ = sender.output(LibraryViewOutput::OpenMix { id, title });
-            }
-            DiscoveryViewInput::PlayTrack { id } => {
-                let _ = sender.output(LibraryViewOutput::PlayTrack { track_id: id });
+            DiscoveryViewInput::Forward(out) => {
+                let _ = sender.output(out);
             }
         }
     }
@@ -202,13 +179,18 @@ impl SimpleComponent for DiscoveryViewModel {
                         .root
                         .set_child(Some(&build_empty_widget(self.empty_message)));
                 } else {
+                    let s = sender.clone();
+                    let opener: crate::components::views::common::CategoryOpener =
+                        Rc::new(move |out| {
+                            let _ = s.input_sender().send(DiscoveryViewInput::Forward(out));
+                        });
                     for (i, category) in categories.iter().enumerate() {
                         if i > 0 {
                             widgets
                                 .body
                                 .append(&Separator::new(Orientation::Horizontal));
                         }
-                        let section = build_category_section(category, sender.clone());
+                        let section = build_page_category_section(category, opener.clone());
                         widgets.body.append(&section);
                     }
                 }
@@ -223,250 +205,5 @@ impl SimpleComponent for DiscoveryViewModel {
 fn clear_box(b: &GtkBox) {
     while let Some(child) = b.first_child() {
         b.remove(&child);
-    }
-}
-
-fn build_category_section(
-    category: &PageCategory,
-    sender: ComponentSender<DiscoveryViewModel>,
-) -> GtkBox {
-    let section = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(8)
-        .build();
-
-    if let Some(title) = category.title.as_deref().filter(|s| !s.is_empty()) {
-        let title_label = Label::builder()
-            .label(title)
-            .xalign(0.0)
-            .css_classes(["title-3"])
-            .build();
-        section.append(&title_label);
-    }
-    if let Some(subtitle) = category.subtitle.as_deref().filter(|s| !s.is_empty()) {
-        let sub = Label::builder()
-            .label(subtitle)
-            .xalign(0.0)
-            .css_classes(["dim-label", "caption"])
-            .build();
-        section.append(&sub);
-    }
-
-    if category.items.is_empty() {
-        let empty = Label::builder()
-            .label("(no items)")
-            .xalign(0.0)
-            .css_classes(["dim-label"])
-            .build();
-        section.append(&empty);
-        return section;
-    }
-
-    let flow = FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .max_children_per_line(8)
-        .min_children_per_line(2)
-        .row_spacing(12)
-        .column_spacing(12)
-        .homogeneous(true)
-        .build();
-    for item in &category.items {
-        if let Some(card) = build_item_card(item, sender.clone()) {
-            let child = FlowBoxChild::builder().child(&card).build();
-            flow.append(&child);
-        }
-    }
-    section.append(&flow);
-    section
-}
-
-fn build_item_card(
-    item: &PageItem,
-    sender: ComponentSender<DiscoveryViewModel>,
-) -> Option<GtkBox> {
-    let card = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(4)
-        .css_classes(["album-card"])
-        .build();
-
-    // Phase 7 wires the cover fetcher; for now every card uses the same
-    // placeholder icon so the layout is consistent.
-    let cover = Image::builder()
-        .icon_name("audio-x-generic-symbolic")
-        .pixel_size(160)
-        .css_classes(["album-cover-img"])
-        .build();
-    card.append(&cover);
-
-    let (primary, secondary, on_click): (String, String, Box<dyn Fn(&ComponentSender<DiscoveryViewModel>)>) =
-        match item {
-            PageItem::Track(t) => {
-                let title = if t.name.is_empty() {
-                    "Unknown".to_string()
-                } else {
-                    t.name.clone()
-                };
-                let artist = primary_artist(t.artist.as_ref(), &t.artists);
-                let id = t.id;
-                (
-                    title,
-                    artist,
-                    Box::new(move |s| {
-                        let _ = s.input_sender().send(DiscoveryViewInput::PlayTrack { id });
-                    }),
-                )
-            }
-            PageItem::Album(a) => {
-                let title = if a.name.is_empty() {
-                    "Unknown".to_string()
-                } else {
-                    a.name.clone()
-                };
-                let artist = primary_artist(a.artist.as_ref(), &a.artists);
-                let id = a.id;
-                let title_owned = title.clone();
-                (
-                    title,
-                    artist,
-                    Box::new(move |s| {
-                        let _ = s.input_sender().send(DiscoveryViewInput::OpenAlbum {
-                            id,
-                            title: title_owned.clone(),
-                        });
-                    }),
-                )
-            }
-            PageItem::Artist(a) => {
-                let name = if a.name.is_empty() {
-                    "Unknown".to_string()
-                } else {
-                    a.name.clone()
-                };
-                let id = a.id;
-                let name_owned = name.clone();
-                (name, String::new(), Box::new(move |s| {
-                    let _ = s.input_sender().send(DiscoveryViewInput::OpenArtist {
-                        id,
-                        name: name_owned.clone(),
-                    });
-                }))
-            }
-            PageItem::Playlist(p) => {
-                let title = if p.name.is_empty() {
-                    "Untitled playlist".to_string()
-                } else {
-                    p.name.clone()
-                };
-                let count = p
-                    .num_tracks
-                    .filter(|n| *n > 0)
-                    .map(|n| format!("{n} tracks"))
-                    .unwrap_or_default();
-                let id = p.id.clone();
-                let title_owned = title.clone();
-                (
-                    title,
-                    count,
-                    Box::new(move |s| {
-                        let _ = s.input_sender().send(DiscoveryViewInput::OpenPlaylist {
-                            id: id.clone(),
-                            title: title_owned.clone(),
-                        });
-                    }),
-                )
-            }
-            PageItem::Mix(m) => {
-                let title = if m.title.is_empty() {
-                    "Mix".to_string()
-                } else {
-                    m.title.clone()
-                };
-                let sub = m.sub_title.clone().unwrap_or_default();
-                let id = m.id.clone();
-                let title_owned = title.clone();
-                (
-                    title,
-                    sub,
-                    Box::new(move |s| {
-                        let _ = s.input_sender().send(DiscoveryViewInput::OpenMix {
-                            id: id.clone(),
-                            title: title_owned.clone(),
-                        });
-                    }),
-                )
-            }
-            PageItem::Video(_) => {
-                // Phase 6 doesn't render videos — the discovery views skip
-                // them. Returning None drops the card entirely.
-                return None;
-            }
-            PageItem::Card(c) => {
-                let title = c
-                    .header
-                    .clone()
-                    .or_else(|| c.short_header.clone())
-                    .or_else(|| c.title.clone())
-                    .unwrap_or_else(|| "—".to_string());
-                let sub = c
-                    .short_sub_header
-                    .clone()
-                    .or_else(|| c.sub_title.clone())
-                    .unwrap_or_default();
-                // Cards without a typed action don't open anything in
-                // Phase 6 — Phase 7's link router will pick them up.
-                (title, sub, Box::new(|_| {}))
-            }
-        };
-
-    let title_label = Label::builder()
-        .label(&primary)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .max_width_chars(18)
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build();
-    card.append(&title_label);
-
-    if !secondary.is_empty() {
-        let sub_label = Label::builder()
-            .label(&secondary)
-            .ellipsize(gtk::pango::EllipsizeMode::End)
-            .max_width_chars(18)
-            .xalign(0.0)
-            .css_classes(["dim-label", "caption"])
-            .build();
-        card.append(&sub_label);
-    }
-
-    let click = gtk::GestureClick::new();
-    click.connect_pressed(move |_, n_press, _, _| {
-        if n_press == 1 {
-            on_click(&sender);
-        }
-    });
-    card.add_controller(click);
-
-    Some(card)
-}
-
-fn primary_artist(
-    primary: Option<&rust_tidal_core::api::ArtistRef>,
-    fallback: &[rust_tidal_core::api::ArtistRef],
-) -> String {
-    if let Some(a) = primary {
-        if !a.name.is_empty() {
-            return a.name.clone();
-        }
-    }
-    let names: Vec<&str> = fallback
-        .iter()
-        .map(|a| a.name.as_str())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if names.is_empty() {
-        String::new()
-    } else {
-        names.join(", ")
     }
 }
