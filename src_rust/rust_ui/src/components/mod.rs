@@ -18,3 +18,4 @@ pub mod settings_dialog;
 pub mod sidebar;
 pub mod signal_path_window;
 pub mod views;
+pub mod visualizer;

@@ -139,6 +139,13 @@ pub enum AppInput {
         path: std::path::PathBuf,
     },
 
+    // ---- Visualizer (Phase 9-B) ------------------------------------
+    /// 33ms timer fire — pulls the latest spectrum frame from the
+    /// engine and forwards it to the bars visualizer. Always emitted
+    /// (even between fresh audio frames) so the EMA can settle during
+    /// silence.
+    VizTick,
+
     // ---- Tray (Phase 8-J) ------------------------------------------
     /// Tray "Show window" / left-click: present + raise the main
     /// window, unhiding it if it had been minimized to tray.

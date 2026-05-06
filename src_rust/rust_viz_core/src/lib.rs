@@ -258,7 +258,7 @@ impl VizProcessor {
 }
 
 impl VizStateEngine {
-    fn new(
+    pub fn new(
         num_bars: usize,
         smooth: f32,
         trail_decay: f32,
@@ -285,7 +285,7 @@ impl VizStateEngine {
         }
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.target.fill(0.0);
         self.current.fill(0.0);
         self.trail.fill(0.0);
@@ -294,7 +294,7 @@ impl VizStateEngine {
         self.bass_level = 0.0;
     }
 
-    fn set_params(
+    pub fn set_params(
         &mut self,
         smooth: f32,
         trail_decay: f32,
@@ -314,11 +314,11 @@ impl VizStateEngine {
         self.bass_smooth = bass_smooth.clamp(0.0, 1.0);
     }
 
-    fn set_release_smooth(&mut self, release_smooth: f32) {
+    pub fn set_release_smooth(&mut self, release_smooth: f32) {
         self.release_smooth = release_smooth.clamp(0.0, 1.0);
     }
 
-    fn set_target_from_slice(&mut self, input: &[f32]) -> usize {
+    pub fn set_target_from_slice(&mut self, input: &[f32]) -> usize {
         let n = self.num_bars.min(input.len());
         self.target[..n].copy_from_slice(&input[..n]);
         if n < self.num_bars {
@@ -327,7 +327,7 @@ impl VizStateEngine {
         n
     }
 
-    fn tick(&mut self) {
+    pub fn tick(&mut self) {
         let n = self.num_bars;
         let bass_n = (n / 10).max(1);
         let mut bass_acc = 0.0_f32;
@@ -360,6 +360,27 @@ impl VizStateEngine {
         }
         let bass_tgt = bass_acc / (bass_n as f32);
         self.bass_level += (bass_tgt - self.bass_level) * self.bass_smooth;
+    }
+
+    /// Smoothed bar heights (post-tick).
+    pub fn current(&self) -> &[f32] {
+        &self.current
+    }
+    /// Decaying trail values (slower-falling envelope).
+    pub fn trail(&self) -> &[f32] {
+        &self.trail
+    }
+    /// Peak-hold values (with peak_fall decay applied).
+    pub fn peak(&self) -> &[f32] {
+        &self.peak
+    }
+    /// Smoothed bass-band level (0..1ish).
+    pub fn bass_level(&self) -> f32 {
+        self.bass_level
+    }
+    /// Configured bar count.
+    pub fn num_bars(&self) -> usize {
+        self.num_bars
     }
 }
 
@@ -571,6 +592,30 @@ fn map_linear_spectrum_impl(
         let mixed = (out_peak[i] * 0.5) + (out_mean[i] * 0.5);
         out[i] = (mixed * linear_display_voicing(center_f, half_rate_hz)).min(1.0);
     }
+}
+
+/// Map a raw FFT magnitude buffer onto `out.len()` log-spaced bars in
+/// the [0, 1] range. Pure helper so callers can drive a
+/// `VizStateEngine` directly from `Engine::copy_spectrum_mono` without
+/// going through the FFI surface.
+pub fn map_log_spectrum(input: &[f32], out: &mut [f32], db_min: f32, db_range: f32) {
+    map_log_spectrum_impl(input, out, db_min, db_range);
+}
+
+/// Linear-frequency variant of `map_log_spectrum`. Bars are evenly
+/// spaced on the [0, half-rate] axis instead of log-distributed.
+/// `half_rate_hz` is typically 24000 (sample rate / 2) for 48kHz
+/// content; the per-bar voicing applies a mild HF boost to compensate
+/// for the HF perceptual rolloff.
+pub fn map_linear_spectrum(
+    input: &[f32],
+    out: &mut [f32],
+    db_min: f32,
+    db_range: f32,
+    half_rate_hz: f32,
+) {
+    let n = input.len();
+    map_linear_spectrum_impl(input, out, n, db_min, db_range, half_rate_hz);
 }
 
 fn map_log_spectrum_impl(input: &[f32], out: &mut [f32], db_min: f32, db_range: f32) {

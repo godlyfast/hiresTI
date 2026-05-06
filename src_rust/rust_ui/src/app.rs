@@ -42,6 +42,7 @@ use crate::components::pkce_login_dialog::{
 };
 use crate::components::mini_player::{MiniPlayerInput, MiniPlayerModel, MiniPlayerOutput};
 use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
+use crate::components::visualizer::{BarsVisualizerInput, BarsVisualizerModel};
 use crate::components::views::album_detail::{AlbumDetailInit, AlbumDetailViewModel};
 use crate::components::views::albums::{AlbumsViewInput, AlbumsViewModel};
 use crate::components::views::artist_detail::{ArtistDetailInit, ArtistDetailViewModel};
@@ -83,6 +84,17 @@ pub struct AppController {
     content: Controller<ContentStackModel>,
     #[allow(dead_code)]
     mini: Controller<MiniPlayerModel>,
+    /// Spectrum bars strip above the mini-player. Driven by a 33ms
+    /// timer that pulls the latest FFT frame from the audio engine.
+    viz: Controller<BarsVisualizerModel>,
+    /// Last spectrum frame `seq` we forwarded into the visualizer.
+    /// Stops us from re-sending the same frame when the engine hasn't
+    /// produced a new one yet (timer ticks at 30Hz, audio at ~50Hz —
+    /// roughly aligned but not synchronized).
+    viz_last_seq: u64,
+    /// Whether the bars are currently in "active" coloring (transport
+    /// is playing). Tracked so we only send `SetActive` on transitions.
+    viz_active: bool,
     login: Controller<LoginDialogModel>,
     pkce_login: Controller<PkceLoginDialogModel>,
 
@@ -318,6 +330,8 @@ impl SimpleComponent for AppController {
             },
         );
 
+        let viz = BarsVisualizerModel::builder().launch(()).detach();
+
         let login = LoginDialogModel::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
@@ -356,6 +370,7 @@ impl SimpleComponent for AppController {
         body.append(&paned);
 
         body.append(&Separator::new(Orientation::Horizontal));
+        body.append(viz.widget());
         body.append(mini.widget());
 
         toolbar.set_content(Some(&body));
@@ -392,6 +407,11 @@ impl SimpleComponent for AppController {
                 }
                 let vol = (init.audio.volume.min(150) as f32) / 100.0;
                 e.set_volume(vol);
+                // Spectrum analyzer for the bars visualizer. 256 bands
+                // gives the log-spaced bar mapper enough resolution at
+                // the low end without burning CPU in the FFT.
+                e.set_spectrum_bands(256);
+                e.set_spectrum_enabled(true);
                 Some(e)
             }
             Err(err) => {
@@ -418,6 +438,15 @@ impl SimpleComponent for AppController {
         let s = sender.clone();
         glib::timeout_add_seconds_local(1, move || {
             let _ = s.input_sender().send(AppInput::PlaybackTick);
+            glib::ControlFlow::Continue
+        });
+
+        // ~30Hz visualizer tick. Drives both the EMA settling and the
+        // queue_draw on the bars strip. Cheap when there's no audio
+        // engine — the handler just no-ops past the spectrum read.
+        let s = sender.clone();
+        glib::timeout_add_local(Duration::from_millis(33), move || {
+            let _ = s.input_sender().send(AppInput::VizTick);
             glib::ControlFlow::Continue
         });
 
@@ -463,6 +492,9 @@ impl SimpleComponent for AppController {
             sidebar,
             content,
             mini,
+            viz,
+            viz_last_seq: 0,
+            viz_active: false,
             login,
             pkce_login,
             albums_view,
@@ -864,6 +896,31 @@ impl SimpleComponent for AppController {
             }
             AppInput::PlaybackTick => {
                 self.tick_playback_position();
+            }
+            AppInput::VizTick => {
+                let is_playing =
+                    matches!(self.model.playback.transport, TransportState::Playing);
+                if is_playing != self.viz_active {
+                    self.viz_active = is_playing;
+                    self.viz
+                        .sender()
+                        .send(BarsVisualizerInput::SetActive(is_playing))
+                        .ok();
+                }
+                if let Some(engine) = self.engine.as_ref() {
+                    let seq = engine.spectrum_seq();
+                    let len = engine.spectrum_len();
+                    if seq != self.viz_last_seq && len > 0 {
+                        self.viz_last_seq = seq;
+                        let mut buf = vec![0.0f32; len];
+                        engine.copy_spectrum_mono(&mut buf);
+                        self.viz
+                            .sender()
+                            .send(BarsVisualizerInput::SetFrame { seq, values: buf })
+                            .ok();
+                    }
+                }
+                self.viz.sender().send(BarsVisualizerInput::Tick).ok();
             }
             AppInput::TrayShow => {
                 let win = &self.window_for_dialogs;

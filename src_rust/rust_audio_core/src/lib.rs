@@ -1488,6 +1488,42 @@ impl Engine {
     pub fn last_error_msg(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
+
+    /// Toggle the spectrum analysis filter. When off the spectrum
+    /// values stay at zero. Mirrors `rac_set_spectrum_enabled` minus
+    /// the FFI plumbing.
+    pub fn set_spectrum_enabled(&mut self, enabled: bool) {
+        self.set_spectrum_filter_enabled(enabled);
+    }
+
+    /// Set the active spectrum band count (clamped to [2, 4096]).
+    /// Larger counts give finer frequency resolution at the cost of
+    /// more compute per frame.
+    pub fn set_spectrum_bands(&mut self, bands: u32) {
+        self.set_spectrum_active_bands(bands);
+    }
+
+    /// Snapshot the most-recent mono spectrum frame. `seq` increments
+    /// when a new frame arrives — UI code can poll and skip the copy
+    /// when seq hasn't changed.
+    pub fn spectrum_seq(&self) -> u64 {
+        self.spectrum_seq
+    }
+
+    /// Length (number of bands) of the current spectrum frame.
+    pub fn spectrum_len(&self) -> usize {
+        self.spectrum_len
+    }
+
+    /// Copy the live mono spectrum values into `out`. Returns the
+    /// number of values written (= min(out.len(), spectrum_len())).
+    pub fn copy_spectrum_mono(&self, out: &mut [f32]) -> usize {
+        let n = out.len().min(self.spectrum_len);
+        if n > 0 {
+            out[..n].copy_from_slice(&self.spectrum_vals[..n]);
+        }
+        n
+    }
 }
 
 fn read_running_alsa_hw_params() -> (Option<i32>, Option<i32>) {
