@@ -17,6 +17,29 @@ use rust_tidal_core::api::{
     Page, PersistedToken, Playlist, RequestArgs, RtcError, Session, Track, UserInfo,
 };
 
+/// Resolved playback bundle: track metadata + first usable stream URL.
+/// `quality` echoes back what the manifest actually delivered (TIDAL
+/// downgrades quality silently if the requested level isn't available
+/// for the track), and `is_mpd` flags MPEG-DASH manifests so callers
+/// know to feed the engine the manifest XML instead of a single URL.
+#[derive(Debug, Clone)]
+pub struct ResolvedPlayback {
+    pub track: Track,
+    pub url: Option<String>,
+    /// MPD/DASH manifest XML when `is_mpd` is true. Phase 7-D feeds this
+    /// to a DASH-aware native transport instead of the single URL above.
+    #[allow(dead_code)]
+    pub mpd_manifest: Option<String>,
+    pub quality: String,
+    pub sample_rate: i32,
+    pub bit_depth: i32,
+    /// True when the manifest is the modern BTS shape (single URL list).
+    /// Phase 7-D consults this to pick the playback strategy.
+    #[allow(dead_code)]
+    pub is_bts: bool,
+    pub is_mpd: bool,
+}
+
 use crate::error::{AppError, AppResult};
 use crate::paths;
 
@@ -192,6 +215,45 @@ impl TidalSessionService {
 
     pub fn fetch_mix_blocking(&self, id: &str) -> Result<Mix, RtcError> {
         self.session.fetch_mix(id)
+    }
+
+    /// Standalone track-fetch (no stream-info pairing). Phase 7-D will
+    /// use it to refresh the track info on transport state changes when
+    /// the resolve path was skipped (e.g. mini-player Next button).
+    #[allow(dead_code)]
+    pub fn fetch_track_blocking(&self, id: i64) -> Result<Track, RtcError> {
+        self.session.fetch_track(id)
+    }
+
+    /// Resolve a track to a playable stream. Fetches the metadata + the
+    /// playback envelope on the same thread (two HTTP calls in sequence
+    /// — both are required to render the now-playing surface and queue
+    /// the engine, and parallelizing them only saves a few hundred ms).
+    /// `audio_quality` follows TIDAL's enum: LOW / HIGH / LOSSLESS /
+    /// HI_RES_LOSSLESS.
+    pub fn resolve_playback_blocking(
+        &self,
+        track_id: i64,
+        audio_quality: &str,
+    ) -> Result<ResolvedPlayback, RtcError> {
+        let track = self.session.fetch_track(track_id)?;
+        let info = self.session.fetch_stream(track_id, audio_quality, None, None)?;
+        let url = info.urls.first().cloned();
+        let mpd_manifest = if info.is_mpd {
+            Some(info.manifest_data.clone())
+        } else {
+            None
+        };
+        Ok(ResolvedPlayback {
+            track,
+            url,
+            mpd_manifest,
+            quality: info.audio_quality,
+            sample_rate: info.sample_rate,
+            bit_depth: info.bit_depth,
+            is_bts: info.is_bts,
+            is_mpd: info.is_mpd,
+        })
     }
 
     /// Drain a Mix's items into a Track-only Vec. Mixed-content videos

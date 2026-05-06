@@ -29,7 +29,7 @@ use crate::components::header::{HeaderInput, HeaderModel, HeaderOutput};
 use crate::components::login_dialog::{
     LoginDialogInput, LoginDialogModel, LoginDialogOutput,
 };
-use crate::components::mini_player::{MiniPlayerModel, MiniPlayerOutput};
+use crate::components::mini_player::{MiniPlayerInput, MiniPlayerModel, MiniPlayerOutput};
 use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
 use crate::components::views::album_detail::{AlbumDetailInit, AlbumDetailViewModel};
 use crate::components::views::albums::{AlbumsViewInput, AlbumsViewModel};
@@ -47,7 +47,8 @@ use crate::components::views::playlists::{PlaylistsViewInput, PlaylistsViewModel
 use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
-use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+use crate::services::tidal_session::{spawn_blocking, ResolvedPlayback, TidalSessionService};
+use crate::state::playback::TransportState;
 use crate::settings::Settings;
 use crate::state::auth::{AuthStatus, UserProfile};
 
@@ -90,6 +91,12 @@ pub struct AppController {
     /// drops the previous Controller (and its widget — ContentStack
     /// removes it from the stack via SetDetail).
     detail: Option<DetailPage>,
+
+    /// Monotonic counter for play requests — Phase 7-C uses it as a
+    /// "stale-resolve drop" key so a slow stream-fetch can't clobber a
+    /// fresher click. Wraps without consequence; collisions across 2^64
+    /// clicks aren't a real concern.
+    play_request_counter: u64,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -316,6 +323,7 @@ impl SimpleComponent for AppController {
             top_view,
             hires_view,
             detail: None,
+            play_request_counter: 0,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -459,7 +467,20 @@ impl SimpleComponent for AppController {
                 self.close_detail();
             }
             AppInput::PlayTrack { track_id } => {
-                tracing::info!(track_id, "play track (Phase 7 wires the playback path)");
+                self.start_play_track(track_id, sender.clone());
+            }
+            AppInput::NowPlayingResolved {
+                request_id,
+                resolved,
+            } => {
+                self.handle_now_playing_resolved(request_id, resolved);
+            }
+            AppInput::NowPlayingFailed { request_id, error } => {
+                if request_id != self.play_request_counter {
+                    return;
+                }
+                tracing::warn!(request_id, error = %error, "play resolve failed");
+                self.model.playback.transport = TransportState::Stopped;
             }
         }
     }
@@ -532,6 +553,87 @@ impl AppController {
             // need their own component shape — Phase 6.5.
             NavTarget::Genres | NavTarget::Decades | NavTarget::Moods => {}
         }
+    }
+
+    fn start_play_track(&mut self, track_id: i64, sender: ComponentSender<Self>) {
+        self.play_request_counter = self.play_request_counter.wrapping_add(1);
+        let request_id = self.play_request_counter;
+        self.model.playback.transport = TransportState::Buffering;
+        // Reset position so the seek bar doesn't show the previous
+        // track's leftover progress while we wait for resolution.
+        self.model.playback.position = std::time::Duration::ZERO;
+        self.mini
+            .sender()
+            .send(MiniPlayerInput::SetNowPlaying {
+                title: format!("Loading track {track_id}…"),
+                artist: String::new(),
+            })
+            .ok();
+        self.mini
+            .sender()
+            .send(MiniPlayerInput::SetProgress(0.0))
+            .ok();
+
+        let svc = self.session.clone();
+        // Phase 7-C uses HI_RES_LOSSLESS unconditionally. Phase 8 wires
+        // the quality setting + per-track downgrade fallback chain that
+        // Python's _resolve_quality_chain handles.
+        let quality = "HI_RES_LOSSLESS".to_string();
+        let sender_in = sender.input_sender().clone();
+        spawn_blocking(
+            move || svc.resolve_playback_blocking(track_id, &quality),
+            move |result| {
+                let msg = match result {
+                    Ok(resolved) => AppInput::NowPlayingResolved {
+                        request_id,
+                        resolved,
+                    },
+                    Err(e) => AppInput::NowPlayingFailed {
+                        request_id,
+                        error: e.to_string(),
+                    },
+                };
+                let _ = sender_in.send(msg);
+            },
+        );
+    }
+
+    fn handle_now_playing_resolved(&mut self, request_id: u64, resolved: ResolvedPlayback) {
+        if request_id != self.play_request_counter {
+            tracing::debug!(request_id, "stale play resolve dropped");
+            return;
+        }
+        let track = &resolved.track;
+        let title = if track.name.is_empty() {
+            format!("Track {}", track.id)
+        } else {
+            track.name.clone()
+        };
+        let artist = crate::components::views::common::track_artist_name(track);
+        tracing::info!(
+            track_id = track.id,
+            quality = %resolved.quality,
+            sample_rate = resolved.sample_rate,
+            bit_depth = resolved.bit_depth,
+            url_present = resolved.url.is_some(),
+            mpd = resolved.is_mpd,
+            "playback resolved"
+        );
+        self.mini
+            .sender()
+            .send(MiniPlayerInput::SetNowPlaying {
+                title: title.clone(),
+                artist: artist.clone(),
+            })
+            .ok();
+        self.model.playback.current_track = Some(track.clone());
+        self.model.playback.duration =
+            std::time::Duration::from_secs(track.duration.max(0) as u64);
+        // Phase 7-D will hand `resolved.url` / `resolved.mpd_manifest`
+        // to rust_audio_core and flip transport to Playing once the
+        // engine confirms the URI loaded. For now we leave it Buffering
+        // so the user sees a clear indicator the request landed but
+        // playback hasn't actually started.
     }
 
     fn open_album_detail(

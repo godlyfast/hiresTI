@@ -84,6 +84,21 @@ pub enum AppInput {
     /// Pop the currently-open detail surface and return to the active
     /// nav target. Header back-button + sidebar clicks both emit this.
     CloseDetail,
+
+    // ---- Playback (Phase 7-C) --------------------------------------
+    /// Stream resolution finished for a Play request. Carries enough
+    /// info to populate the mini-player and (Phase 7-D) hand off to
+    /// rust_audio_core. `request_id` matches what PlayTrack handed to
+    /// the worker — stale resolves (the user clicked another track
+    /// before this one came back) are dropped.
+    NowPlayingResolved {
+        request_id: u64,
+        resolved: crate::services::tidal_session::ResolvedPlayback,
+    },
+    NowPlayingFailed {
+        request_id: u64,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone)]
