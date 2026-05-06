@@ -31,6 +31,7 @@ pub enum HeaderOutput {
     LoginRequested,
     OpenSettings,
     OpenAbout,
+    OpenDiagnostics,
     BackPressed,
 }
 
@@ -183,6 +184,20 @@ fn build_settings_popover(sender: ComponentSender<HeaderModel>) -> gtk::Popover 
         .build();
     lb.append(&about_row);
 
+    let diag_row = gtk::ListBoxRow::builder()
+        .child(
+            &Label::builder()
+                .label("Diagnostics")
+                .xalign(0.0)
+                .margin_top(6)
+                .margin_bottom(6)
+                .margin_start(12)
+                .margin_end(12)
+                .build(),
+        )
+        .build();
+    lb.append(&diag_row);
+
     let pop_clone = pop.clone();
     let sender_clone = sender.clone();
     lb.connect_row_activated(move |_, row| {
@@ -191,6 +206,8 @@ fn build_settings_popover(sender: ComponentSender<HeaderModel>) -> gtk::Popover 
             let _ = sender_clone.output(HeaderOutput::OpenSettings);
         } else if row == &about_row {
             let _ = sender_clone.output(HeaderOutput::OpenAbout);
+        } else if row == &diag_row {
+            let _ = sender_clone.output(HeaderOutput::OpenDiagnostics);
         }
     });
 

@@ -36,6 +36,7 @@ pub enum AppInput {
     RequestLogin,
     OpenSettings,
     OpenAbout,
+    OpenDiagnostics,
 
     // ---- Mini player outputs ---------------------------------------
     TransportPlay,

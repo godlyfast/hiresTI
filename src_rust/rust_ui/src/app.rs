@@ -23,6 +23,7 @@ use relm4::{
 };
 
 use crate::components::about_dialog;
+use crate::components::diagnostics_dialog::{self, EngineSnapshot};
 use crate::components::settings_dialog;
 use crate::components::content_stack::{
     ContentStackInit, ContentStackInput, ContentStackModel,
@@ -174,6 +175,7 @@ impl SimpleComponent for AppController {
                 HeaderOutput::LoginRequested => AppInput::RequestLogin,
                 HeaderOutput::OpenSettings => AppInput::OpenSettings,
                 HeaderOutput::OpenAbout => AppInput::OpenAbout,
+                HeaderOutput::OpenDiagnostics => AppInput::OpenDiagnostics,
                 HeaderOutput::BackPressed => AppInput::CloseDetail,
             },
         );
@@ -522,6 +524,29 @@ impl SimpleComponent for AppController {
             }
             AppInput::OpenAbout => {
                 about_dialog::present(self.window_for_dialogs.upcast_ref());
+            }
+            AppInput::OpenDiagnostics => {
+                let snap = match self.engine.as_ref() {
+                    Some(e) => EngineSnapshot {
+                        available: true,
+                        last_error: e.last_error_msg().map(str::to_string),
+                        is_playing: e.is_currently_playing(),
+                        position_seconds: e.position_seconds(),
+                        duration_seconds: e.duration_seconds(),
+                    },
+                    None => EngineSnapshot {
+                        available: false,
+                        last_error: None,
+                        is_playing: false,
+                        position_seconds: 0.0,
+                        duration_seconds: 0.0,
+                    },
+                };
+                diagnostics_dialog::present(
+                    self.window_for_dialogs.upcast_ref(),
+                    &self.model,
+                    snap,
+                );
             }
             AppInput::TransportPlay => {
                 // Phase 7-D: if we already have a buffered URI, resume.
