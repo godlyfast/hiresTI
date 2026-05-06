@@ -30,6 +30,7 @@ use crate::components::about_dialog;
 use crate::components::diagnostics_dialog::{self, EngineSnapshot};
 use crate::components::dr_meter::{DrMeterInput, DrMeterModel};
 use crate::components::dsp_preset_dialog;
+use crate::components::lyric_strip::{LyricStripInput, LyricStripModel};
 use crate::components::settings_dialog;
 use crate::components::signal_path_window;
 use crate::components::content_stack::{
@@ -64,6 +65,7 @@ use crate::components::views::tabbed_discovery::{
 use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
+use crate::services::lyrics::{LyricsService, ParsedLyrics};
 use crate::services::mpris::{self, MprisHandle, MprisMetadata, MprisTransport};
 use crate::services::scrobbler::{ScrobbleTrack, ScrobblerConfig, ScrobblerService};
 use crate::services::tidal_session::{spawn_blocking, ResolvedPlayback, TidalSessionService};
@@ -161,6 +163,17 @@ pub struct AppController {
     /// detached worker threads. Configured from `settings.extra` on
     /// init + every ApplySettings.
     scrobbler: ScrobblerService,
+
+    /// Lyrics fetcher + LRC parser. Holds an internal LRU cache so a
+    /// rewind / repeat doesn't re-hit the Tidal API.
+    lyrics: LyricsService,
+    lyric_strip: Controller<LyricStripModel>,
+    /// Cached parse for the currently-playing track. Replaced on each
+    /// successful fetch; cleared on logout / track change.
+    current_lyrics: Option<std::sync::Arc<ParsedLyrics>>,
+    /// Index of the line currently shown in the lyric strip. Tracked
+    /// so PlaybackTick only re-pushes when the active line changes.
+    current_lyric_idx: Option<usize>,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -349,6 +362,7 @@ impl SimpleComponent for AppController {
 
         let viz = BarsVisualizerModel::builder().launch(()).detach();
         let dr_meter = DrMeterModel::builder().launch(()).detach();
+        let lyric_strip = LyricStripModel::builder().launch(()).detach();
 
         let login = LoginDialogModel::builder().launch(()).forward(
             sender.input_sender(),
@@ -390,6 +404,7 @@ impl SimpleComponent for AppController {
         body.append(&Separator::new(Orientation::Horizontal));
         body.append(viz.widget());
         body.append(dr_meter.widget());
+        body.append(lyric_strip.widget());
         body.append(mini.widget());
 
         toolbar.set_content(Some(&body));
@@ -552,6 +567,10 @@ impl SimpleComponent for AppController {
             tray,
             mpris,
             scrobbler,
+            lyrics: LyricsService::new(),
+            lyric_strip,
+            current_lyrics: None,
+            current_lyric_idx: None,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -626,6 +645,12 @@ impl SimpleComponent for AppController {
                 self.model.playback = Default::default();
                 self.model.queue = Default::default();
                 self.scrobbler.on_track_stopped();
+                self.current_lyrics = None;
+                self.current_lyric_idx = None;
+                self.lyric_strip
+                    .sender()
+                    .send(LyricStripInput::SetLine(None))
+                    .ok();
                 if let Some(m) = self.mpris.as_ref() {
                     m.stop();
                     m.set_metadata(MprisMetadata::default());
@@ -996,6 +1021,23 @@ impl SimpleComponent for AppController {
                     self.window_for_dialogs.close();
                 }
             }
+            AppInput::LyricsResolved {
+                request_id,
+                lyrics,
+            } => {
+                if request_id != self.play_request_counter {
+                    return;
+                }
+                self.current_lyrics = lyrics;
+                self.current_lyric_idx = None;
+                if self.current_lyrics.is_none() {
+                    self.lyric_strip
+                        .sender()
+                        .send(LyricStripInput::SetLine(None))
+                        .ok();
+                }
+                // The next PlaybackTick will pick the active line up.
+            }
             AppInput::NowPlayingCoverReady { request_id, path } => {
                 if request_id != self.play_request_counter {
                     return;
@@ -1224,6 +1266,24 @@ impl AppController {
         // Scrobble check on the same 1s cadence — the service guards
         // against double-submit + missing config internally.
         self.scrobbler.tick(pos, dur);
+
+        // Sync the lyric strip with the current playback position.
+        // Only push when the active line index actually changes so we
+        // don't churn the label on every 1s tick.
+        if let Some(parsed) = self.current_lyrics.as_ref() {
+            let idx = parsed
+                .synced
+                .iter()
+                .rposition(|l| l.time <= pos);
+            if idx != self.current_lyric_idx {
+                self.current_lyric_idx = idx;
+                let line = idx.and_then(|i| parsed.synced.get(i).map(|l| l.text.clone()));
+                self.lyric_strip
+                    .sender()
+                    .send(LyricStripInput::SetLine(line))
+                    .ok();
+            }
+        }
     }
 
     fn start_play_track(&mut self, track_id: i64, sender: ComponentSender<Self>) {
@@ -1358,6 +1418,28 @@ impl AppController {
                 .unwrap_or_default(),
             duration: track.duration.max(0) as u32,
         });
+
+        // Reset the lyric strip + kick a fetch. Stale resolves are
+        // gated by request_id so a fast-skip doesn't push the wrong
+        // track's lines.
+        self.current_lyrics = None;
+        self.current_lyric_idx = None;
+        self.lyric_strip
+            .sender()
+            .send(LyricStripInput::SetLine(None))
+            .ok();
+        let app_in = sender.input_sender().clone();
+        self.lyrics.fetch_async(
+            self.session.clone(),
+            track.id,
+            request_id,
+            move |req, lyrics| {
+                let _ = app_in.send(AppInput::LyricsResolved {
+                    request_id: req,
+                    lyrics,
+                });
+            },
+        );
 
         // Hand the URL to rust_audio_core. The resolver already falls
         // back to the legacy URL endpoint for MPD manifests so we

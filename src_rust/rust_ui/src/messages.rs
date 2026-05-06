@@ -139,6 +139,15 @@ pub enum AppInput {
         path: std::path::PathBuf,
     },
 
+    // ---- Lyrics (Phase 10-C) ---------------------------------------
+    /// Lyrics fetch worker came back. `request_id` matches the play
+    /// counter from when the fetch was kicked off — out-of-order
+    /// resolves are dropped at the handler.
+    LyricsResolved {
+        request_id: u64,
+        lyrics: Option<std::sync::Arc<crate::services::lyrics::ParsedLyrics>>,
+    },
+
     // ---- Visualizer (Phase 9-B) ------------------------------------
     /// 33ms timer fire — pulls the latest spectrum frame from the
     /// engine and forwards it to the bars visualizer. Always emitted

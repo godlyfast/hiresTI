@@ -7,6 +7,7 @@
 
 pub mod covers;
 pub mod dsp_preset;
+pub mod lyrics;
 pub mod mpris;
 pub mod scrobbler;
 pub mod tidal_session;

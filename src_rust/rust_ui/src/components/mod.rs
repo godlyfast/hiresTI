@@ -13,6 +13,7 @@ pub mod dr_meter;
 pub mod dsp_preset_dialog;
 pub mod header;
 pub mod login_dialog;
+pub mod lyric_strip;
 pub mod mini_player;
 pub mod pkce_login_dialog;
 pub mod settings_dialog;

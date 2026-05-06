@@ -208,6 +208,16 @@ impl TidalSessionService {
         self.session.fetch_album(id)
     }
 
+    /// Track lyrics. Returns the raw `Lyrics` struct — the caller
+    /// (services::lyrics) decides whether to use `subtitles` (LRC) or
+    /// fall back to `text` (static lyrics).
+    pub fn track_lyrics_blocking(
+        &self,
+        track_id: i64,
+    ) -> Result<rust_tidal_core::api::Lyrics, RtcError> {
+        self.session.track_lyrics(track_id)
+    }
+
     pub fn list_album_tracks_blocking(&self, id: i64) -> Result<Vec<Track>, RtcError> {
         drain_pages(|args| self.session.album_tracks(id, args))
     }
