@@ -1,16 +1,14 @@
 //! Liked Tracks list. Vertical ListBox with one row per track:
 //! `<index>  <title>          <artist>  <duration>`. Click → play.
 
-use relm4::gtk::{
-    self, prelude::*, Box as GtkBox, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow,
-};
+use relm4::gtk::{self, prelude::*, ListBox, ScrolledWindow};
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
 use rust_tidal_core::api::Track;
 
 use crate::components::views::common::{
-    build_empty_widget, build_error_widget, build_loading_widget, format_duration,
-    track_artist_name, LibraryViewOutput, ViewLoadState,
+    build_empty_widget, build_error_widget, build_loading_widget, build_track_row,
+    LibraryViewOutput, ViewLoadState,
 };
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
 
@@ -135,7 +133,10 @@ impl SimpleComponent for TracksViewModel {
                     )));
                 } else {
                     for (idx, track) in self.items.iter().enumerate() {
-                        let row = build_track_row(idx + 1, track, sender.clone());
+                        let s = sender.clone();
+                        let row = build_track_row(idx + 1, track, move |id| {
+                            let _ = s.input_sender().send(TracksViewInput::Play(id));
+                        });
                         widgets.list.append(&row);
                     }
                 }
@@ -151,67 +152,5 @@ fn clear_listbox(list: &ListBox) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
-}
-
-fn build_track_row(idx: usize, track: &Track, sender: ComponentSender<TracksViewModel>) -> ListBoxRow {
-    let row = ListBoxRow::builder()
-        .css_classes(["track-row"])
-        .activatable(true)
-        .build();
-    let body = GtkBox::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(12)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-
-    let index_label = Label::builder()
-        .label(format!("{idx}"))
-        .width_chars(4)
-        .xalign(1.0)
-        .css_classes(["dim-label", "monospace"])
-        .build();
-    body.append(&index_label);
-
-    let title = if track.name.is_empty() {
-        "Unknown"
-    } else {
-        track.name.as_str()
-    };
-    let title_label = Label::builder()
-        .label(title)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .hexpand(true)
-        .xalign(0.0)
-        .build();
-    body.append(&title_label);
-
-    let artist_label = Label::builder()
-        .label(track_artist_name(track))
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .width_chars(20)
-        .xalign(0.0)
-        .css_classes(["dim-label"])
-        .build();
-    body.append(&artist_label);
-
-    let duration_label = Label::builder()
-        .label(format_duration(track.duration))
-        .width_chars(6)
-        .xalign(1.0)
-        .css_classes(["dim-label", "monospace"])
-        .build();
-    body.append(&duration_label);
-
-    row.set_child(Some(&body));
-
-    let track_id = track.id;
-    row.connect_activate(move |_| {
-        let _ = sender.input_sender().send(TracksViewInput::Play(track_id));
-    });
-
-    row
 }
 

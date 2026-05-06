@@ -7,16 +7,15 @@
 //! so a Refresh while one is mid-flight invalidates both stale callbacks.
 
 use relm4::gtk::{
-    self, prelude::*, Box as GtkBox, Image, Label, ListBox, ListBoxRow, Orientation,
-    ScrolledWindow,
+    self, prelude::*, Box as GtkBox, Image, Label, ListBox, Orientation, ScrolledWindow,
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
 use rust_tidal_core::api::{Album, Track};
 
 use crate::components::views::common::{
-    album_artist_name, build_error_widget, build_loading_widget, format_duration,
-    track_artist_name, LibraryViewOutput, ViewLoadState,
+    album_artist_name, build_error_widget, build_loading_widget, build_track_row,
+    LibraryViewOutput, ViewLoadState,
 };
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
 
@@ -229,7 +228,10 @@ impl SimpleComponent for AlbumDetailViewModel {
             .css_classes(["track-list"])
             .build();
         for (idx, track) in self.tracks.iter().enumerate() {
-            let row = build_track_row(idx + 1, track, sender.clone());
+            let s = sender.clone();
+            let row = build_track_row(idx + 1, track, move |id| {
+                let _ = s.input_sender().send(AlbumDetailInput::Play(id));
+            });
             list.append(&row);
         }
         widgets.body.append(&list);
@@ -360,70 +362,3 @@ fn format_duration_minutes(seconds: i32) -> String {
     }
 }
 
-fn build_track_row(
-    idx: usize,
-    track: &Track,
-    sender: ComponentSender<AlbumDetailViewModel>,
-) -> ListBoxRow {
-    let row = ListBoxRow::builder()
-        .css_classes(["track-row"])
-        .activatable(true)
-        .build();
-    let body = GtkBox::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(12)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-
-    let index_label = Label::builder()
-        .label(format!("{idx}"))
-        .width_chars(4)
-        .xalign(1.0)
-        .css_classes(["dim-label", "monospace"])
-        .build();
-    body.append(&index_label);
-
-    let title = if track.name.is_empty() {
-        "Unknown"
-    } else {
-        track.name.as_str()
-    };
-    let title_label = Label::builder()
-        .label(title)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .hexpand(true)
-        .xalign(0.0)
-        .build();
-    body.append(&title_label);
-
-    let artist_label = Label::builder()
-        .label(track_artist_name(track))
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .width_chars(20)
-        .xalign(0.0)
-        .css_classes(["dim-label"])
-        .build();
-    body.append(&artist_label);
-
-    let duration_label = Label::builder()
-        .label(format_duration(track.duration))
-        .width_chars(6)
-        .xalign(1.0)
-        .css_classes(["dim-label", "monospace"])
-        .build();
-    body.append(&duration_label);
-
-    row.set_child(Some(&body));
-
-    let track_id = track.id;
-    row.connect_activate(move |_| {
-        let _ = sender
-            .input_sender()
-            .send(AlbumDetailInput::Play(track_id));
-    });
-
-    row
-}
