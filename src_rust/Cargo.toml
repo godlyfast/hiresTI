@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "rust_audio_core",
-    "rust_launcher",
     "rust_tidal_core",
     "rust_ui",
     "rust_viz_core",

@@ -5,10 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-# Phase 1: keep distinct from `rust_launcher`'s `hiresti` binary so both
-# coexist during the rewrite. Phase 11 cuts over: `rust_launcher` is
-# retired and this binary is renamed to `hiresti`.
-name = "hiresti_ui"
+# Phase 11 cutover: this is the shipped `hiresti` binary now that
+# the Python launcher has been retired. The crate name stays
+# `hiresti_ui` to avoid churning every workspace internal `cargo
+# build -p` invocation; only the produced binary changes.
+name = "hiresti"
 path = "src/main.rs"
 
 [dependencies]
