@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use libadwaita::prelude::*;
 use libadwaita::{
-    ComboRow, EntryRow, PreferencesGroup, PreferencesPage, PreferencesWindow, SwitchRow,
+    ComboRow, PreferencesGroup, PreferencesPage, PreferencesWindow, SwitchRow,
 };
 use relm4::gtk::{StringList, Window};
 use relm4::Sender;
@@ -196,15 +196,52 @@ fn build_driver_row(working: &Working, sender: Sender<AppInput>) -> ComboRow {
     row
 }
 
-fn build_device_row(working: &Working, sender: Sender<AppInput>) -> EntryRow {
-    let row = EntryRow::builder()
+fn build_device_row(working: &Working, sender: Sender<AppInput>) -> ComboRow {
+    // Enumerate the real USB-audio devices visible to the engine.
+    // Each entry is a (display, id) pair; the id is the
+    // `usb:VVVV:PPPP[:SERIAL]` locator that USB Rawlink v2 expects.
+    let mut entries: Vec<(String, String)> = rust_audio_core::usb_audio::enumerate_usb_audio_devices()
+        .into_iter()
+        .map(|d| {
+            let display = if d.name.is_empty() {
+                d.id()
+            } else {
+                format!("{} ({})", d.name, d.id())
+            };
+            (display, d.id())
+        })
+        .collect();
+    if entries.is_empty() {
+        entries.push((
+            "(no USB-audio devices detected)".to_string(),
+            String::new(),
+        ));
+    }
+
+    let labels: Vec<&str> = entries.iter().map(|(s, _)| s.as_str()).collect();
+    let model = StringList::new(&labels);
+
+    let current = str_from_settings(&working.borrow(), "device").unwrap_or_default();
+    let active = entries
+        .iter()
+        .position(|(_, id)| id == &current)
+        .unwrap_or(0) as u32;
+    let row = ComboRow::builder()
         .title("Output device")
-        .text(str_from_settings(&working.borrow(), "device").unwrap_or_default())
+        .subtitle("USB audio devices currently connected")
+        .model(&model)
+        .selected(active)
         .build();
+
     let working_c = Rc::clone(working);
-    row.connect_apply(move |r| {
-        let text = r.text().to_string();
-        dispatch_change(&working_c, "device", Value::String(text), &sender);
+    let entries_for_cb = entries;
+    row.connect_selected_notify(move |r| {
+        let idx = r.selected() as usize;
+        let id = entries_for_cb
+            .get(idx)
+            .map(|(_, id)| id.clone())
+            .unwrap_or_default();
+        dispatch_change(&working_c, "device", Value::String(id), &sender);
     });
     row
 }
