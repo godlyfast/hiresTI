@@ -1,29 +1,34 @@
 # hiresTI Music Player
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange?logo=rust)
+![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange?logo=rust)
 ![GTK4](https://img.shields.io/badge/UI-GTK4%20%2B%20Libadwaita-green)
 ![License](https://img.shields.io/badge/License-GPL--3.0-purple)
 
-`hiresTI` is a native Linux TIDAL client built for audiophiles, combining high-fidelity playback, rock-solid stability, and a modern GTK4/Libadwaita user experience.
+`hiresTI` is a native Linux TIDAL client built for audiophiles, combining high-fidelity playback, rock-solid stability, and a modern GTK4 / Libadwaita user experience.
 
 > [!IMPORTANT]
 > **Re-login required for FLAC / Hi-Res quality.**
-> The legacy OAuth (device-code) login that previous versions used is now capped by TIDAL at 320 kbps AAC. A new **PKCE** login flow (added in `v1.9.5`) restores access to full FLAC CD-quality and Hi-Res Lossless streams.
+> The legacy OAuth (device-code) login that previous versions used is now capped by TIDAL at 320 kbps AAC. The **PKCE** login flow restores access to full FLAC CD-quality and Hi-Res Lossless streams.
 >
 > If you're still on the old OAuth session, open **Account**, sign out, and sign back in — the login dialog will use PKCE automatically and your library will resume at the higher tiers.
 
+> [!NOTE]
+> **1.10 is a full rewrite to native Rust.** The Python UI layer is gone; the entire app is now a single self-contained Rust binary built on gtk4-rs / libadwaita-rs / Relm4. No Python runtime is required.
+
 ## Highlights
 
-- A high performance Rust audio engine core
-- Bit-perfect playback flow with optional exclusive output controls
-- Built-in USB rawlink driver enables direct USB passthrough, bypassing OS drivers and mixing for purer sound.
-- High-flexibility DSP workspace with reorderable processing, PEQ, convolution, tube/tape color, stereo widening, limiter, resampler, and LV2 plugins
+- High-performance Rust audio engine with bit-perfect playback flow + optional exclusive output controls
+- Built-in USB Rawlink driver enables direct USB passthrough, bypassing OS drivers and mixing for purer sound
+- High-flexibility DSP workspace with reorderable processing, PEQ, convolution, tube/tape color, stereo widening, limiter, and resampler
 - TIDAL PKCE login (recommended for FLAC / Hi-Res) with legacy OAuth fallback, account-scoped library access
-- TIDAL Max Hi-Res Lossless streaming up to 24-bit / 192kHz
-- Built-in queue drawer, lyrics support, and visualizer modules
-- MPRIS support (`org.mpris.MediaPlayer2.hiresti`) for desktop media controls
-- Built-in remote control with HTTP JSON-RPC, MCP endpoint.
+- TIDAL Max Hi-Res Lossless streaming up to 24-bit / 192 kHz
+- Built-in queue, click-to-seek synced lyrics, and three visualizer modes (bars / line / spiral)
+- Live LUFS / dynamic-range readout (momentary, short-term, integrated, LRA, 4 s DR)
+- MPRIS support (`org.mpris.MediaPlayer2.hiresti`) for desktop media controls + media-key shortcuts
+- Last.fm and ListenBrainz scrobbling
+- Linux system tray (StatusNotifierItem)
+- ALSA exclusive `org.freedesktop.ReserveDevice1` reservation so PipeWire / WirePlumber yield the device on demand
+- Built-in remote control with HTTP JSON-RPC
 
 Audio Optimization Guide: [audio-optimization-guide.md](audio-optimization-guide.md)
 
@@ -42,50 +47,38 @@ Audio Optimization Guide: [audio-optimization-guide.md](audio-optimization-guide
 
 ## Tech Stack
 
-- Python 3.10+
-- GTK4 + Libadwaita (PyGObject)
-- Rust audio engine core (`rust_audio_core`)
-- GStreamer (audio pipeline runtime via Rust core)
-- `tidalapi` (TIDAL integration)
-
-## Audio Engine Note
-
-Starting from `v1.2.0`, playback is driven by the Rust audio engine core by default.
-Python remains the UI/application layer, while transport/output routing and core playback runtime run through Rust.
+- Rust 1.80+ with edition 2021
+- gtk4-rs 0.11 + libadwaita-rs 0.9 + Relm4 0.11 (native GTK4 / Libadwaita bindings)
+- Audio engine: `rust_audio_core` — direct ALSA + USB Rawlink V2 transports, integrated DSP graph, isahc/HTTP-2 segment streaming
+- Visualizer / DSP helpers: `rust_viz_core`
+- TIDAL integration: `rust_tidal_core` — direct REST + PKCE / device-code OAuth, no third-party SDK
+- D-Bus: zbus 5 (MPRIS, ALSA reserve, tray)
 
 ## Runtime Requirements
 
-Install these system packages first:
+The shipped binary is fully self-contained. Required system libraries on the target machine:
 
-- Python 3.10+
-- GTK4
-- Libadwaita
-- GStreamer core and plugins
-- PyGObject bindings
+- gtk4
+- libadwaita
+- pipewire (or pulseaudio)
+- alsa-lib
+- libusb-1.0
+- openssl
 
-Bundled Python dependencies used by packaging:
-
-- `tidalapi`
-- `requests`
-- `urllib3`
-- `PyOpenGL`
-- `pystray`
-- `pillow`
+No Python or GStreamer runtime is needed.
 
 ## Quick Start (Source)
 
 ```bash
-python3 -m pip install -r requirements.txt
-cargo build --manifest-path src_rust/rust_audio_core/Cargo.toml --release
-cargo build --manifest-path src_rust/rust_viz_core/Cargo.toml --release
-cargo build --manifest-path src_rust/rust_tidal_core/Cargo.toml --release
-python3 src/main.py
+cargo build --manifest-path src_rust/Cargo.toml --release --bin hiresti
+./src_rust/target/release/hiresti
 ```
 
-`hiresTI` loads the Rust audio, visualizer, and TIDAL cores from `src_rust/*/target/release`, so the `--release` build step is required before running from source.
+The single workspace build links `rust_audio_core`, `rust_viz_core`, and `rust_tidal_core` statically into the `hiresti` binary (~16 MB).
 
 ## Install Prebuilt Packages
-Please download prebuilt package from release page.
+
+Please download prebuilt packages from the release page.
 
 ### Debian / Ubuntu (DEB)
 
@@ -99,10 +92,10 @@ sudo apt install ./hiresti_<version>_amd64.deb
 sudo dnf install ./hiresti-<version>-1.fedora.<arch>.rpm
 ```
 
-### EL9 (Rocky / Alma / RHEL 9)
+### openSUSE Tumbleweed (RPM)
 
 ```bash
-sudo dnf install ./hiresti-<version>-1.el9.<arch>.rpm
+sudo zypper install ./hiresti-<version>-1.opensuse.<arch>.rpm
 ```
 
 ### Arch Linux
@@ -111,36 +104,19 @@ sudo dnf install ./hiresti-<version>-1.el9.<arch>.rpm
 sudo pacman -U ./hiresti-<version>-1-<arch>.pkg.tar.zst
 ```
 
-### Flatpak
-
-```bash
-flatpak install ./hiresti-<version>.flatpak
-```
-
-Run:
-
-```bash
-flatpak run com.hiresti.player
-```
-
-> **Note:** Requires GNOME Platform runtime 48. If not already installed:
-> ```bash
-> flatpak install flathub org.gnome.Platform//48 org.gnome.Sdk//48
-> ```
->
-> User data is stored under `~/.var/app/com.hiresti.player/`.
-
-> ⚠️ **Flatpak limitations:** Due to sandbox restrictions, some audio features (such as automatic Pro-Audio profile switching, exclusive mode) may have reduced functionality compared to native packages. For the best experience, it is recommended to use the native package for your distribution (RPM, DEB, or Arch).
-
-
 ## Upgrade Guide
 
 ### Playlist migration note
 
-Starting from `v1.1.0`, local playlists are removed.
-Only cloud playlists are supported.
+Starting from `v1.1.0`, local playlists are removed. Only cloud playlists are supported.
 
-### Fedora / EL9 RPM upgrades
+### Migrating to 1.10
+
+The 1.10 rewrite drops the Python runtime entirely. Settings / token files in `~/.config/hiresti/` are read-compatible — your account stays signed in across the upgrade.
+
+If you have an older OAuth-only session, sign out + sign back in to switch to PKCE and restore Hi-Res quality.
+
+### Fedora / RPM upgrades
 
 Use upgrade mode when moving to a newer version:
 
@@ -153,8 +129,6 @@ or:
 ```bash
 sudo rpm -Uvh ./hiresti-<version>-1.fedora.<arch>.rpm
 ```
-
-For EL9 packages, replace `fedora` with `el9`.
 
 Do not use `rpm -i` for upgrades, because it installs side-by-side and can cause file conflict errors.
 
@@ -172,10 +146,10 @@ If you hit a problem, please start the app from terminal and attach logs in your
 hiresti 2>&1 | tee /tmp/hiresti.log
 ```
 
-For GTK debug output:
+For richer tracing output:
 
 ```bash
-G_MESSAGES_DEBUG=all hiresti 2>&1 | tee /tmp/hiresti-gtk.log
+RUST_LOG=hiresti_ui=debug,rust_audio_core=info hiresti 2>&1 | tee /tmp/hiresti.log
 ```
 
 When reporting, include:

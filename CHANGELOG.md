@@ -1,5 +1,79 @@
 # Changelog
 
+## 1.10.0 - 2026-05-06
+
+Full rewrite of the UI layer to native Rust. The Python (PyGObject)
+codebase is gone; the entire app is now a single self-contained
+Rust binary built on **gtk4-rs 0.11 / libadwaita-rs 0.9 / Relm4
+0.11** with no Python runtime dependency. ~28k lines of Python
+(`src/`, `tests/`, `tools/`) removed; binary size ~16 MB after
+release build, link time ~3 minutes from a cold cache.
+
+### Changed
+
+- **UI layer: PyGObject → gtk4-rs / libadwaita / Relm4.** Every view,
+  dialog, and component is rewritten as a Relm4 `SimpleComponent`.
+  Settings round-trip preserves the Python `~/.config/hiresti/`
+  layout so existing user state survives the upgrade unchanged.
+- **TIDAL access path: `tidalapi` Python package → `rust_tidal_core`.**
+  Direct REST + PKCE / device-code OAuth + Hi-Res Lossless quality
+  resolution, no third-party SDK in the loop. Token file format is
+  identical to the 1.x build.
+- **Audio engine ownership: GLib idle-add bridge → direct on the GTK
+  main thread.** `rust_audio_core` is `!Send` and now lives inside
+  `AppController` directly; commands flow through the Relm4 input
+  sender without the extra hop through `GLib.idle_add`.
+- **Packaging: single binary install.** PKGBUILD / Dockerfile.build /
+  package.sh now ship just the Rust binary plus icons / .desktop /
+  udev rule / LICENSE. Runtime deps trimmed from the previous ~25
+  packages (Python + 20 python-* + GStreamer + WebKit) to seven:
+  `gtk4`, `libadwaita`, `pipewire`, `libpulse`, `alsa-lib`, `libusb`,
+  `openssl`.
+- **Visualizer:** new 64-bar bars renderer + line + spiral modes,
+  selectable via `settings.viz_mode`. Driven by a 33 ms glib timer
+  pulling spectrum frames straight from the engine's lock-free
+  spectrum buffer.
+
+### Added
+
+- **Live LUFS / DR strip** above the mini-player: momentary,
+  short-term, integrated LUFS plus 30 s LRA and 4 s dynamic range,
+  refreshed every 33 ms during playback.
+- **Synced LRC lyrics** with a one-line strip below the meter.
+  AppController fetches on track resolve, advances the active line
+  on each playback tick (only re-pushes when the line index
+  actually changes).
+- **MPRIS2** (`org.mpris.MediaPlayer2.hiresti`): KDE / GNOME media
+  keys, lock-screen "now playing" tile, transport + metadata +
+  position state always in sync. Bus name suffix matches the Python
+  build, so existing user shortcuts and KWin rules continue to
+  work.
+- **Last.fm + ListenBrainz scrobbling** with the same threshold
+  rules as the Python build (≥ 30 s AND ≥ min(duration / 2, 240 s)).
+  HTTP submissions run on detached worker threads.
+- **`org.freedesktop.ReserveDevice1` (ALSA reserve)** so PipeWire /
+  WirePlumber release the ALSA card on driver / device switch and
+  on quit.
+- **HTTP / JSON-RPC remote control** over loopback (`tiny_http`).
+  Methods: `ping`, `auth.status`, `player.{get_state, play, pause,
+  play_pause, next, previous, stop, seek}`, `queue.get`. Optional
+  bearer token + CIDR allow-list.
+- **System tray** (KDE/freedesktop StatusNotifierItem via `ksni`)
+  with show / pause / next / previous / quit menu, X11 + Wayland.
+
+### Removed
+
+- `src/` (Python source tree, ~28k lines)
+- `tests/` (Python tests)
+- `tools/` (Python utilities, including `build_py_binary.sh`,
+  `play_headless.py`, `tidal_capture.py`)
+- `flatpak/` (manifest + AppStream metainfo + python3 requirements
+  lock; flatpak target is no longer in scope)
+- `rust_launcher/` (Python launcher binary; the new `rust_ui` crate
+  produces `hiresti` directly)
+- `requirements.txt`, `requirements-dev.txt`, `pytest.ini`,
+  `generate_logo.py`, the `hiresti` bash shim, `test_ui.sh`
+
 ## 1.9.5 beta4 - 2026-05-03
 
 Beta build that follows up the isahc / HTTP/2 swap (beta3) with **parallel multi-segment prefetch**.  beta3 confirmed h2 negotiation and fast `setup_ms`, but a tester still hit ~10 s of stuttering mid-track — Tidal's CDN delivers each HTTP stream at roughly real-time per stream, so the previous 1-deep prefetch could never accumulate more than ~1 segment of head-room in the chunk channel and a 5 s network blip drained the entire pipeline.  This build opens up to 4 segments concurrently on the same h2 connection; nghttp2 multiplexes their bodies and the combined throughput is link-limited (Tidal will give you all 100 Mbps if you ask for 4 streams), so the chunk channel can actually pre-fill to several seconds of compressed FLAC ahead of the decoder.

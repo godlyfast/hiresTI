@@ -4,234 +4,117 @@ This document describes the project structure of hiresTI for developers and cont
 
 ## Overview
 
-hiresTI is a native Linux desktop client for TIDAL, built with Python (GTK4/Libadwaita) for the UI layer and Rust for the audio engine core.
+hiresTI is a native Linux desktop client for TIDAL written entirely in Rust. The shipped binary statically links a four-crate workspace:
+
+- `rust_ui` — gtk4-rs / libadwaita / Relm4 UI, the binary entry point
+- `rust_audio_core` — direct ALSA + USB Rawlink V2 transports, integrated DSP graph
+- `rust_viz_core` — FFT / spectrum mapping, viz state machine, render-mode helpers
+- `rust_tidal_core` — TIDAL REST + PKCE / device-code OAuth client
+
+No Python runtime, no GStreamer, no third-party SDK in the loop.
 
 ## Directory Structure
 
 ```
 hiresTI/
-├── src/                    # Main Python source code
-│   ├── main.py            # Application entry point
-│   ├── core/              # Core application modules
-│   ├── backend/           # External service integrations
-│   ├── models/            # Data models
-│   ├── services/          # Business logic services
-│   ├── ui/                # User interface components
-│   ├── actions/           # User action handlers
-│   ├── viz/               # Visualizer components
-│   ├── utils/             # Utility functions
-│   └── _rust/             # Rust bindings (FFI)
-├── src_rust/              # Rust source code
-│   ├── rust_audio_core/   # Audio playback engine
-│   ├── rust_viz_core/     # Visualization processing
-│   └── rust_launcher/     # Application launcher
-├── tests/                 # Unit tests
-├── flatpak/               # Flatpak packaging
-└── icons/                 # Application icons
+├── src_rust/
+│   ├── Cargo.toml          # Workspace root
+│   ├── rust_ui/            # GTK4 binary `hiresti`
+│   ├── rust_audio_core/    # Audio engine (ALSA + USB Rawlink V2)
+│   ├── rust_viz_core/      # FFT + viz helpers
+│   └── rust_tidal_core/    # TIDAL REST client
+├── aur/                    # AUR PKGBUILD
+├── icons/                  # Application icons
+├── screenshots/
+├── package.sh              # Local + Docker package builds
+├── Dockerfile.build        # Multi-distro Docker builder
+├── version.txt
+├── README.md / README_CN.md
+├── CHANGELOG.md
+└── audio-optimization-guide.md
 ```
 
-## Module Details
+## `rust_ui/` — UI binary
 
-### `src/core/` - Core Application Modules
+Entry point at `src/main.rs`; the Relm4 component graph is rooted in `src/app.rs::AppController`. Module layout:
 
-Low-level application infrastructure and configuration.
+| Path                                | Description                                                            |
+|-------------------------------------|------------------------------------------------------------------------|
+| `src/app.rs`                        | Root SimpleComponent. Owns the engine + child controllers.             |
+| `src/messages.rs`                   | `AppInput` enum — every UI event flows through one variant.            |
+| `src/model.rs`                      | `AppModel` — settings + auth + playback + queue state.                 |
+| `src/settings.rs`                   | Settings round-trip with forward-compatible `extra: serde_json::Map`.  |
+| `src/state/`                        | Auth + playback + queue substates.                                     |
+| `src/components/`                   | One module per Relm4 component.                                        |
+| `src/components/views/`             | Library / discovery / detail pages.                                    |
+| `src/services/`                     | Long-lived services (see below).                                       |
 
-| File | Description |
-|------|-------------|
-| `constants.py` | Application constants (PlayMode, LyricsSettings, AudioLatency, VisualizerSettings, etc.) |
-| `settings.py` | Settings management (load/save configuration) |
-| `errors.py` | Error classification and user message handling |
-| `logging.py` | Logging setup and configuration |
-| `executor.py` | Task execution utilities (submit_task, submit_daemon) |
+### `src/components/` highlights
 
-### `src/backend/` - External Service Integrations
+| Module                              | Role                                                                   |
+|-------------------------------------|------------------------------------------------------------------------|
+| `header.rs`                         | App-bar with search, login, settings, back button.                     |
+| `sidebar.rs`                        | Discover / library / recent navigation.                                |
+| `content_stack.rs`                  | Page swap container with detail-page overlay.                          |
+| `mini_player.rs`                    | Bottom transport bar with seek + cover.                                |
+| `visualizer.rs`                     | Bars / line / spiral cairo renderer.                                   |
+| `dr_meter.rs`                       | LUFS / DR readout strip.                                               |
+| `lyric_strip.rs`                    | Single-line synchronized lyric overlay.                                |
+| `settings_dialog.rs`, `dsp_preset_dialog.rs`, `signal_path_window.rs`, `diagnostics_dialog.rs`, `about_dialog.rs` | Modal dialogs.                                                |
+| `login_dialog.rs`, `pkce_login_dialog.rs` | OAuth device-code + PKCE flows.                                  |
 
-Third-party service integrations.
+### `src/services/`
 
-| File | Description |
-|------|-------------|
-| `tidal.py` | TIDAL API client (OAuth, playlist management, search, streaming) |
+Long-lived workers that the UI consumes via cheap-clone handles. Most run on dedicated threads with an `async-io` or `tiny_http` event loop.
 
-### `src/models/` - Data Models
+| Module                | Thread model                                          | Role                                                                   |
+|-----------------------|-------------------------------------------------------|------------------------------------------------------------------------|
+| `tidal_session.rs`    | Worker pool via `spawn_blocking`                      | TIDAL REST + auth (`rust_tidal_core` Session).                         |
+| `covers.rs`           | Per-fetch worker thread                               | Album-art fetch + on-disk cache.                                       |
+| `tray.rs`             | Dedicated `ksni` thread                               | Linux StatusNotifierItem.                                              |
+| `mpris.rs`            | Dedicated async-io thread (`!Send` `Player`)          | `org.mpris.MediaPlayer2.hiresti` D-Bus interface.                      |
+| `scrobbler.rs`        | Per-submit worker thread                              | Last.fm + ListenBrainz scrobbling.                                     |
+| `lyrics.rs`           | Worker via `spawn_blocking`                           | LRC fetch + parse + LRU cache.                                         |
+| `alsa_reserve.rs`     | Dedicated async-io thread                             | `org.freedesktop.ReserveDevice1` for ALSA exclusive.                   |
+| `remote_api.rs`       | Dedicated `tiny_http` thread                          | HTTP / JSON-RPC remote control.                                        |
+| `dsp_preset.rs`       | Synchronous (called from UI)                          | DSP preset import / export.                                            |
 
-Data structures representing domain entities.
+## `rust_audio_core/`
 
-| File | Description |
-|------|-------------|
-| `local.py` | Local data models (LocalArtist, LocalAlbum, LocalTrack) |
-| `playlist.py` | Playlist and history management (HistoryManager, PlaylistManager) |
+Audio engine: integrates ALSA-direct and USB Rawlink V2 transports, the DSP graph (PEQ, convolution, tube/tape color, stereo widening, limiter, resampler), LUFS / spectrum DSP nodes, and TIDAL stream segmenting (isahc-backed, HTTP/2 with parallel multi-segment prefetch). Exposes both an `Engine` Rust API (consumed by `rust_ui`) and a C FFI surface (used historically by Python).
 
-### `src/services/` - Business Logic Services
+## `rust_viz_core/`
 
-Service layer handling core application functionality.
+FFT + viz helpers: `VizStateEngine` (EMA + peak hold + bass extraction), `map_log_spectrum` / `map_linear_spectrum` for FFT-to-bar mapping, and point-list builders for the bars / line / spiral / ring / fall / dots viz modes. Dual-link `cdylib + rlib`; consumed by `rust_ui` via the rlib.
 
-| File | Description |
-|------|-------------|
-| `lyrics.py` | Lyrics fetching and management |
-| `signal_path.py` | Audio signal path window (PipeWire/PulseAudio monitoring) |
+## `rust_tidal_core/`
 
-### `src/ui/` - User Interface Components
+Pure-Rust TIDAL client: REST endpoints, OAuth device-code + PKCE flows, persisted token round-trip, models (`Track`, `Album`, `Artist`, `Playlist`, `Mix`, …), tail surfaces (`Lyrics`, `Bio`, `Page`). Dual-link `cdylib + rlib`.
 
-UI components and builders.
+## Building
 
-| File | Description |
-|------|-------------|
-| `builders.py` | Main UI builder functions |
-| `views_builders.py` | View builder functions |
-| `track_table.py` | Track table components |
-| `config.py` | UI configuration constants |
-
-### `src/actions/` - User Action Handlers
-
-Event handlers for user interactions.
-
-| File | Description |
-|------|-------------|
-| `playback_actions.py` | Play/pause, next/previous track handling |
-| `audio_settings_actions.py` | Audio device, latency, driver settings |
-| `lyrics_playback_actions.py` | Lyrics display and synchronization |
-| `playback_stream_actions.py` | Stream quality, URL handling |
-| `ui_actions.py` | UI rendering and updates |
-| `ui_navigation.py` | Navigation and routing |
-
-### `src/viz/` - Visualizer Components
-
-Audio visualization modules.
-
-| File | Description |
-|------|-------------|
-| `visualizer.py` | Base spectrum visualizer (Cairo) |
-| `visualizer_gpu.py` | GPU-accelerated visualizer |
-| `visualizer_glarea.py` | OpenGL-based visualizer |
-| `background_viz.py` | Background visualizer for window |
-
-### `src/utils/` - Utility Functions
-
-Helper functions and utilities.
-
-| File | Description |
-|------|-------------|
-| `helpers.py` | Image caching, cover art generation, audio caching, cursor utilities |
-
-### `src/_rust/` - Rust Bindings (FFI)
-
-Python bindings for Rust components.
-
-| File | Description |
-|------|-------------|
-| `audio.py` | Rust audio engine wrapper (create_audio_engine, RustAudioPlayerAdapter) |
-| `viz.py` | Rust visualizer processor (RustVizCore, RustBarsRenderer) |
-
-### `src_rust/` - Rust Source Code
-
-Native Rust implementations for performance-critical components.
-
-| Directory | Description |
-|-----------|-------------|
-| `rust_audio_core/` | Audio playback engine (GStreamer-based) |
-| `rust_viz_core/` | FFT and visualization processing |
-| `rust_launcher/` | Application launcher |
-
-## Key Dependencies
-
-### Python Dependencies
-
-- `gi` (PyGObject) - GTK4/Libadwaita bindings
-- `tidalapi` - TIDAL API client
-- `requests` - HTTP client
-- `qrcode` - QR code generation for login
-- `pystray` - System tray support
-- `PIL` (Pillow) - Image processing
-
-### Rust Dependencies (vendored)
-
-- `gstreamer` - Audio pipeline
-- `rubato` - Resampling
-- `symphonia` - Audio decoding
-- `anyhow` - Error handling
-
-## Import Conventions
-
-The project uses relative imports within the `src/` package:
-
-```python
-# Core modules
-from core.settings import load_settings
-from core.logging import setup_logging
-from core.errors import classify_exception
-
-# Backend
-from backend import TidalBackend
-
-# Models
-from models import HistoryManager, PlaylistManager
-
-# Services
-from services.lyrics import LyricsManager
-from services.signal_path import AudioSignalPathWindow
-
-# UI
-from ui import builders, views_builders
-from ui.config import *
-
-# Actions
-from actions import playback_actions, ui_actions
-
-# Utils
-import utils.helpers as utils
-
-# Rust bindings
-from _rust.audio import create_audio_engine
-from _rust.viz import RustVizCore
-```
-
-## Running the Application
+Single workspace command:
 
 ```bash
-# From project root
-python src/main.py
-
-# Or using the package script
-./package.sh run
+cargo build --manifest-path src_rust/Cargo.toml --release --bin hiresti
 ```
 
-## Building Rust Components
-
-```bash
-# Build audio core
-cd src_rust/rust_audio_core
-cargo build --release
-
-# Build viz core
-cd src_rust/rust_viz_core
-cargo build --release
-```
-
-## Testing
-
-```bash
-# Run all tests
-pytest
-
-# Run specific test file
-pytest tests/test_playback_actions.py
-```
+Produces `src_rust/target/release/hiresti` (~16 MB, fully self-contained).
 
 ## Architecture Notes
 
-1. **Hybrid Python/Rust Design**: The application uses Python for UI and high-level logic, with Rust handling performance-critical audio processing.
+1. **Single-process, single-thread main loop.** GTK widgets are `!Send`, so the GTK main thread owns the `AppModel`, the audio `Engine`, and every Relm4 controller. Background work (HTTP, D-Bus, scrobbling, lyrics fetch, MPRIS state push) runs on dedicated worker threads and posts results back through `relm4::Sender<AppInput>` (which is `Send + Clone`).
 
-2. **Event-Driven UI**: GTK4's signal system handles user interactions through action modules.
+2. **State machine via `AppInput`.** Every user action — sidebar nav, transport buttons, dialog submissions, tray menu activations, MPRIS method calls, remote-API RPC commands — produces an `AppInput` variant. The root `update` arm matches exhaustively, so the compiler catches missing wiring.
 
-3. **Service Layer**: Business logic is encapsulated in services, keeping UI code clean.
+3. **Settings carry an `extra: serde_json::Map`.** Unknown fields round-trip unchanged, so a newer or older build can read each other's config without losing user state.
 
-4. **Model-View separation**: Models define data structures, UI modules handle rendering.
+4. **Cover-art / lyrics / token fetches are guarded by `request_id`.** A monotonic play counter (`AppController::play_request_counter`) gates stale resolves so a fast-skip doesn't push the previous track's cover or lyrics into the mini-player.
 
 ## Contributing
 
 When adding new functionality:
 
-1. Place new code in the appropriate module directory
-2. Update imports in affected files
-3. Add tests in `tests/`
-4. Update this document if the structure changes
+1. Place new code in the appropriate module directory.
+2. Add an `AppInput` variant if it produces state changes.
+3. Update this document if the structure changes.
