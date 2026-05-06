@@ -37,3 +37,11 @@ ureq = { version = "2", features = ["tls"], default-features = false }
 # works on both X11 and Wayland. Use the blocking API so the dedicated
 # tray thread doesn't pull a tokio runtime into the UI process.
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+
+# MPRIS2 media-player D-Bus interface so KDE/GNOME media keys + status
+# bars can drive transport. Default features pull async-io (no tokio).
+# Runs on its own thread with a smol/async-io block_on loop.
+mpris-server = "0.10"
+async-io = "2"
+async-channel = "2"
+futures-lite = "2"

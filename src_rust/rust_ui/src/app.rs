@@ -8,6 +8,7 @@
 //! run on background threads; results return through the input sender,
 //! which Relm4 marshals to the GTK main loop.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -63,6 +64,7 @@ use crate::components::views::tabbed_discovery::{
 use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
+use crate::services::mpris::{self, MprisHandle, MprisMetadata, MprisTransport};
 use crate::services::tidal_session::{spawn_blocking, ResolvedPlayback, TidalSessionService};
 use crate::services::tray::{self, TrayHandle};
 use crate::state::playback::TransportState;
@@ -148,6 +150,10 @@ pub struct AppController {
     /// most likely on minimal CI environments). `Drop` on the handle
     /// shuts down the tray thread.
     tray: Option<TrayHandle>,
+
+    /// MPRIS2 D-Bus service. None when zbus session init failed.
+    /// `Drop` queues a Shutdown command and joins the worker thread.
+    mpris: Option<MprisHandle>,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -468,6 +474,17 @@ impl SimpleComponent for AppController {
             }
         };
 
+        // ---- MPRIS service --------------------------------------------
+        // Same shape as tray: own D-Bus thread, AppInput sender for
+        // incoming method calls, command channel for outgoing state.
+        let mpris = match mpris::start(sender.input_sender().clone()) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::info!(error = %e, "MPRIS unavailable; running without media-key support");
+                None
+            }
+        };
+
         // Window close → hide-to-tray when tray is up; otherwise
         // standard quit behavior. The user can always exit via
         // tray "Quit" or by re-running and quitting properly.
@@ -522,6 +539,7 @@ impl SimpleComponent for AppController {
             engine,
             window_for_dialogs: root.clone(),
             tray,
+            mpris,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -590,6 +608,11 @@ impl SimpleComponent for AppController {
                 }
                 self.model.playback = Default::default();
                 self.model.queue = Default::default();
+                if let Some(m) = self.mpris.as_ref() {
+                    m.stop();
+                    m.set_metadata(MprisMetadata::default());
+                    m.set_can(false, false, false, false, false);
+                }
                 self.mini
                     .sender()
                     .send(MiniPlayerInput::SetNowPlaying {
@@ -672,6 +695,7 @@ impl SimpleComponent for AppController {
                         tracing::warn!(error = %e, "engine play failed");
                     } else {
                         self.model.playback.transport = TransportState::Playing;
+                        self.mpris_sync_transport();
                     }
                 }
             }
@@ -681,6 +705,7 @@ impl SimpleComponent for AppController {
                         tracing::warn!(error = %e, "engine pause failed");
                     } else {
                         self.model.playback.transport = TransportState::Paused;
+                        self.mpris_sync_transport();
                     }
                 }
             }
@@ -704,6 +729,8 @@ impl SimpleComponent for AppController {
                         * self.model.playback.duration.as_secs_f64().max(0.0);
                     if let Err(e) = engine.seek_seconds(target) {
                         tracing::warn!(error = %e, "engine seek failed");
+                    } else if let Some(m) = self.mpris.as_ref() {
+                        m.set_position(target, true);
                     }
                 }
             }
@@ -957,8 +984,11 @@ impl SimpleComponent for AppController {
                 }
                 self.mini
                     .sender()
-                    .send(MiniPlayerInput::SetCover(Some(path)))
+                    .send(MiniPlayerInput::SetCover(Some(path.clone())))
                     .ok();
+                if let Some(m) = self.mpris.as_ref() {
+                    m.set_metadata(self.build_mpris_metadata(Some(path)));
+                }
             }
         }
     }
@@ -995,6 +1025,67 @@ impl AppController {
         if let Err(e) = self.model.settings.save() {
             tracing::warn!(error = %e, "settings save failed");
         }
+    }
+
+    /// Snapshot the current playback into an MPRIS metadata payload.
+    /// `art_path` overrides whatever's already cached on the model so
+    /// the cover-ready handler can splice in a freshly-downloaded
+    /// thumbnail without repopulating the rest from scratch.
+    fn build_mpris_metadata(&self, art_path: Option<PathBuf>) -> MprisMetadata {
+        let track = match self.model.playback.current_track.as_ref() {
+            Some(t) => t,
+            None => return MprisMetadata::default(),
+        };
+        let title = if track.name.is_empty() {
+            format!("Track {}", track.id)
+        } else {
+            track.name.clone()
+        };
+        let artist = crate::components::views::common::track_artist_name(track);
+        let album = track
+            .album
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        // Album-artist isn't reliably present on Tidal Track payloads;
+        // fall back to the track's first artist so KDE/GNOME show
+        // *something* in the album-artist row.
+        let album_artist = artist.clone();
+        let duration_seconds = self.model.playback.duration.as_secs_f64();
+        MprisMetadata {
+            track_id: Some(track.id),
+            title,
+            artist,
+            album,
+            album_artist,
+            duration_seconds,
+            art_path,
+        }
+    }
+
+    /// Push transport + can-* flags to MPRIS in one shot. Called from
+    /// every state-changing update arm so KDE/GNOME stay in sync.
+    fn mpris_sync_transport(&self) {
+        let Some(m) = self.mpris.as_ref() else {
+            return;
+        };
+        let t = match self.model.playback.transport {
+            TransportState::Playing => MprisTransport::Playing,
+            TransportState::Paused => MprisTransport::Paused,
+            TransportState::Buffering => MprisTransport::Playing,
+            TransportState::Stopped => MprisTransport::Stopped,
+        };
+        m.set_transport(t);
+        let has_track = self.model.playback.current_track.is_some();
+        let queue_len = self.model.queue.tracks.len();
+        let cur = self.model.queue.current_index;
+        m.set_can(
+            has_track, // can_play
+            has_track, // can_pause
+            queue_len > 0 && cur + 1 < queue_len,
+            queue_len > 0 && cur > 0,
+            has_track, // can_seek
+        );
     }
 
     /// On navigation, ask the destination view to fetch its data. The
@@ -1106,6 +1197,12 @@ impl AppController {
             .sender()
             .send(MiniPlayerInput::SetProgress(fraction))
             .ok();
+        if let Some(m) = self.mpris.as_ref() {
+            // emit_seeked=false: spec says position changes from
+            // ordinary playback shouldn't fire Seeked, only explicit
+            // SetPosition / Seek calls.
+            m.set_position(pos, false);
+        }
     }
 
     fn start_play_track(&mut self, track_id: i64, sender: ComponentSender<Self>) {
@@ -1219,6 +1316,14 @@ impl AppController {
             );
         }
 
+        // Push initial MPRIS metadata (no cover yet — that arrives
+        // via NowPlayingCoverReady once the artwork download
+        // finishes). Doing it before the engine handoff keeps the
+        // "now playing" lock-screen tile in sync with the mini-player.
+        if let Some(m) = self.mpris.as_ref() {
+            m.set_metadata(self.build_mpris_metadata(None));
+        }
+
         // Hand the URL to rust_audio_core. The resolver already falls
         // back to the legacy URL endpoint for MPD manifests so we
         // expect a single playable URL here for both BTS and MPD; if
@@ -1231,6 +1336,7 @@ impl AppController {
                 "stream resolved without a URL"
             );
             self.model.playback.transport = TransportState::Stopped;
+            self.mpris_sync_transport();
             return;
         };
         let Some(engine) = self.engine.as_mut() else {
@@ -1247,6 +1353,7 @@ impl AppController {
                 self.model.playback.transport = TransportState::Stopped;
             }
         }
+        self.mpris_sync_transport();
     }
 
     fn open_album_detail(

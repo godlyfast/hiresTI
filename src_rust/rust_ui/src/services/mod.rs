@@ -7,5 +7,6 @@
 
 pub mod covers;
 pub mod dsp_preset;
+pub mod mpris;
 pub mod tidal_session;
 pub mod tray;
