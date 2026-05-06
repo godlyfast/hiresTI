@@ -9,6 +9,7 @@
 //! views land top-down in subsequent phases.
 
 mod app;
+mod components;
 mod error;
 mod messages;
 mod model;

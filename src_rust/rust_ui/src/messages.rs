@@ -30,6 +30,19 @@ pub enum AppInput {
     /// Settings mutated outside the UI flow (e.g. by an action handler).
     /// Root re-applies and persists.
     ApplySettings(Settings),
+
+    // ---- Header outputs --------------------------------------------
+    Search(String),
+    RequestLogin,
+    OpenSettings,
+    OpenAbout,
+
+    // ---- Mini player outputs ---------------------------------------
+    TransportPlay,
+    TransportPause,
+    TransportNext,
+    TransportPrev,
+    TransportSeek(f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
