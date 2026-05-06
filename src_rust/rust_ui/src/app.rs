@@ -16,7 +16,10 @@ use libadwaita::prelude::*;
 use libadwaita::{ApplicationWindow, ToolbarView};
 use relm4::adw::Application;
 use relm4::gtk::glib;
-use relm4::gtk::{Box as GtkBox, Orientation, Paned, Separator};
+use relm4::gtk::{
+    Box as GtkBox, CallbackAction, Orientation, Paned, Separator, Shortcut, ShortcutController,
+    ShortcutScope, ShortcutTrigger,
+};
 use relm4::{
     Component, ComponentController, ComponentParts, ComponentSender, Controller,
     SimpleComponent,
@@ -374,6 +377,16 @@ impl SimpleComponent for AppController {
         };
         let _ = &mut engine; // suppress warning if Engine::new always succeeds
 
+        // ---- Keyboard shortcuts --------------------------------------
+        // Space toggles play/pause, Left/Right step the queue, Esc
+        // closes any open detail surface. Scope::Global so the
+        // shortcut fires regardless of focus, except when an entry
+        // widget swallows the key first (search box etc.).
+        install_shortcut(&root, "space", AppInput::TogglePlayPause, sender.clone());
+        install_shortcut(&root, "Left", AppInput::TransportPrev, sender.clone());
+        install_shortcut(&root, "Right", AppInput::TransportNext, sender.clone());
+        install_shortcut(&root, "Escape", AppInput::CloseDetail, sender.clone());
+
         // ---- Playback tick --------------------------------------------
         // 1s cadence is plenty for the seek scale; finer-grained position
         // is read on demand if Phase 8 adds a Now Playing window with a
@@ -574,6 +587,14 @@ impl SimpleComponent for AppController {
             }
             AppInput::TransportPrev => {
                 self.advance_queue(-1, sender.clone());
+            }
+            AppInput::TogglePlayPause => {
+                let next = if matches!(self.model.playback.transport, TransportState::Playing) {
+                    AppInput::TransportPause
+                } else {
+                    AppInput::TransportPlay
+                };
+                let _ = sender.input_sender().send(next);
             }
             AppInput::TransportSeek(p) => {
                 if let Some(engine) = self.engine.as_mut() {
@@ -1177,6 +1198,35 @@ impl AppController {
 /// view forwards through this so a click on an artist link inside an
 /// album-detail page reaches the same root handler as a click on an
 /// artist tile in the Artists library page.
+/// Attach a single keyboard shortcut at window scope that posts a
+/// fixed `AppInput` variant. `glib::Propagation::Stop` is returned so
+/// the matched key doesn't fall through to default text-handling
+/// elsewhere in the tree.
+fn install_shortcut(
+    window: &ApplicationWindow,
+    accel: &str,
+    action: AppInput,
+    sender: ComponentSender<AppController>,
+) {
+    let Some(trigger) = ShortcutTrigger::parse_string(accel) else {
+        tracing::warn!(accel, "invalid shortcut trigger");
+        return;
+    };
+    let action_clone = action.clone();
+    let cb = CallbackAction::new(move |_, _| {
+        let _ = sender.input_sender().send(action_clone.clone());
+        glib::Propagation::Stop
+    });
+    let shortcut = Shortcut::builder()
+        .trigger(&trigger)
+        .action(&cb)
+        .build();
+    let controller = ShortcutController::new();
+    controller.set_scope(ShortcutScope::Global);
+    controller.add_shortcut(shortcut);
+    window.add_controller(controller);
+}
+
 fn settings_str(s: &Settings, key: &str) -> Option<String> {
     s.extra
         .get(key)

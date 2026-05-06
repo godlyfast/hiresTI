@@ -44,6 +44,10 @@ pub enum AppInput {
     TransportNext,
     TransportPrev,
     TransportSeek(f64),
+    /// Keyboard "Play/Pause" toggle. Emits the right transport message
+    /// based on `model.playback.transport`. Lets shortcut handlers stay
+    /// state-free.
+    TogglePlayPause,
 
     // ---- Auth flow (Phase 4) ---------------------------------------
     /// Result of the cold-start token restore attempt. None = no token
