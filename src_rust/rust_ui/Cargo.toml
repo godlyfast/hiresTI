@@ -26,3 +26,4 @@ tracing-subscriber.workspace = true
 # In-workspace deps. Expose Tidal model types + Session directly so the
 # UI can hand domain values around without re-serializing through JSON.
 rust_tidal_core = { path = "../rust_tidal_core" }
+rust_audio_core = { path = "../rust_audio_core" }

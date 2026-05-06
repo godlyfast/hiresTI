@@ -49,6 +49,7 @@ use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
 use crate::services::tidal_session::{spawn_blocking, ResolvedPlayback, TidalSessionService};
 use crate::state::playback::TransportState;
+use rust_audio_core::Engine;
 use crate::settings::Settings;
 use crate::state::auth::{AuthStatus, UserProfile};
 
@@ -97,6 +98,11 @@ pub struct AppController {
     /// fresher click. Wraps without consequence; collisions across 2^64
     /// clicks aren't a real concern.
     play_request_counter: u64,
+
+    /// rust_audio_core engine. None on platforms where construction
+    /// fails (no usable native transport) — playback flows degrade to
+    /// log-only without crashing the UI.
+    engine: Option<Engine>,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -296,6 +302,30 @@ impl SimpleComponent for AppController {
             });
         });
 
+        // ---- Audio engine ---------------------------------------------
+        let mut engine = match Engine::new() {
+            Ok(mut e) => {
+                let driver = init.audio.driver.as_str();
+                let device = if init.audio.device.is_empty() {
+                    None
+                } else {
+                    Some(init.audio.device.as_str())
+                };
+                let rc = e.set_output(driver, device);
+                if rc != 0 {
+                    tracing::warn!(rc, driver, "engine.set_output rejected — falling back to defaults");
+                }
+                let vol = (init.audio.volume.min(150) as f32) / 100.0;
+                e.set_volume(vol);
+                Some(e)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "rust_audio_core engine init failed; running without audio");
+                None
+            }
+        };
+        let _ = &mut engine; // suppress warning if Engine::new always succeeds
+
         // ---- Cold-start auth restore ----------------------------------
         // If a token file exists, kick off load_token + check_login on a
         // worker thread. We don't block init() because /v1/sessions can
@@ -324,6 +354,7 @@ impl SimpleComponent for AppController {
             hires_view,
             detail: None,
             play_request_counter: 0,
+            engine,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -375,14 +406,40 @@ impl SimpleComponent for AppController {
             AppInput::OpenAbout => {
                 tracing::info!("about dialog requested (Phase 8)");
             }
-            AppInput::TransportPlay
-            | AppInput::TransportPause
-            | AppInput::TransportNext
-            | AppInput::TransportPrev => {
-                tracing::info!(?msg, "transport (Phase 4 wires the audio engine)");
+            AppInput::TransportPlay => {
+                // Phase 7-D: if we already have a buffered URI, resume.
+                // Otherwise the click is a no-op until the user picks a
+                // track from a list.
+                if let Some(engine) = self.engine.as_mut() {
+                    if let Err(e) = engine.play() {
+                        tracing::warn!(error = %e, "engine play failed");
+                    } else {
+                        self.model.playback.transport = TransportState::Playing;
+                    }
+                }
+            }
+            AppInput::TransportPause => {
+                if let Some(engine) = self.engine.as_mut() {
+                    if let Err(e) = engine.pause() {
+                        tracing::warn!(error = %e, "engine pause failed");
+                    } else {
+                        self.model.playback.transport = TransportState::Paused;
+                    }
+                }
+            }
+            AppInput::TransportNext | AppInput::TransportPrev => {
+                // Queue navigation arrives in Phase 7-E with the queue
+                // manager. For now log and leave engine state alone.
+                tracing::info!(?msg, "transport next/prev (Phase 7-E queues this)");
             }
             AppInput::TransportSeek(p) => {
-                tracing::debug!(seek = p, "seek (Phase 4 wires the audio engine)");
+                if let Some(engine) = self.engine.as_mut() {
+                    let target = p.clamp(0.0, 1.0)
+                        * self.model.playback.duration.as_secs_f64().max(0.0);
+                    if let Err(e) = engine.seek_seconds(target) {
+                        tracing::warn!(error = %e, "engine seek failed");
+                    }
+                }
             }
 
             AppInput::AuthRestoreResult(profile) => {
@@ -629,11 +686,34 @@ impl AppController {
         self.model.playback.current_track = Some(track.clone());
         self.model.playback.duration =
             std::time::Duration::from_secs(track.duration.max(0) as u64);
-        // Phase 7-D will hand `resolved.url` / `resolved.mpd_manifest`
-        // to rust_audio_core and flip transport to Playing once the
-        // engine confirms the URI loaded. For now we leave it Buffering
-        // so the user sees a clear indicator the request landed but
-        // playback hasn't actually started.
+
+        // Hand the URL to rust_audio_core. MPD manifests aren't wired
+        // yet — those need a DASH-aware feeder in the engine, which
+        // Phase 7-E plumbs. For now MPD tracks log a warning and stay
+        // in Buffering.
+        if resolved.is_mpd {
+            tracing::warn!(track_id = track.id, "MPD manifest playback not yet wired");
+            return;
+        }
+        let Some(url) = resolved.url else {
+            tracing::warn!(track_id = track.id, "stream resolved without a URL");
+            self.model.playback.transport = TransportState::Stopped;
+            return;
+        };
+        let Some(engine) = self.engine.as_mut() else {
+            tracing::info!(track_id = track.id, %url, "no audio engine — staying in Buffering");
+            return;
+        };
+        engine.set_uri_str(&url);
+        match engine.play() {
+            Ok(()) => {
+                self.model.playback.transport = TransportState::Playing;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "engine.play failed");
+                self.model.playback.transport = TransportState::Stopped;
+            }
+        }
     }
 
     fn open_album_detail(

@@ -972,7 +972,7 @@ impl Engine {
         }
     }
 
-    fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
         let dsp_config = DspGraphConfig::default();
         let spectrum_enabled = false;
 
@@ -1342,13 +1342,151 @@ impl Engine {
         0
     }
 
-    fn set_output(&mut self, driver: &str, device: Option<&str>) -> c_int {
+    pub fn set_output(&mut self, driver: &str, device: Option<&str>) -> c_int {
         self.set_output_tuned(driver, device, 100_000, 10_000, false)
     }
 
     fn set_mmap_realtime_priority(&mut self, priority: i32) -> c_int {
         self.output_mmap_realtime_priority = priority.max(0);
         0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rust-native API surface (Phase 7-D). Mirrors the rac_* C entry points
+// for in-process callers (rust_ui) so they don't have to round-trip
+// through *mut Engine pointers + nul-terminated strings. Each method is
+// a thin wrapper over the same logic the matching `rac_*` extern uses.
+// ---------------------------------------------------------------------------
+
+impl Engine {
+    /// Stage `uri` for the next play. Mirrors `rac_set_uri` minus the
+    /// FFI plumbing — same side effects (load native transport for the
+    /// URI, reset spectrum timeline, clear cached codec/rate/depth).
+    pub fn set_uri_str(&mut self, uri: &str) {
+        self.uri = uri.to_string();
+        self.maybe_load_native_transport_for_uri(uri);
+        self.reset_spectrum_timeline();
+        self.last_codec.clear();
+        self.last_bitrate = 0;
+        self.last_rate = 0;
+        self.last_depth = 0;
+        self.source_rate = 0;
+        self.source_depth = 0;
+    }
+
+    pub fn play(&mut self) -> Result<(), String> {
+        if self.uri.is_empty() {
+            self.set_error("rac_play: empty uri");
+            return Err("empty uri".into());
+        }
+        match self.native_transport.play() {
+            Ok(()) => {
+                self.emit_event(EVT_STATE, "Playing");
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("native transport play failed: {e}");
+                self.set_error(msg.clone());
+                self.emit_event(EVT_ERROR, &msg);
+                Err(msg)
+            }
+        }
+    }
+
+    pub fn pause(&mut self) -> Result<(), String> {
+        match self.native_transport.pause() {
+            Ok(()) => {
+                self.emit_event(EVT_STATE, "Paused");
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("native transport pause failed: {e}");
+                self.set_error(msg.clone());
+                self.emit_event(EVT_ERROR, &msg);
+                Err(msg)
+            }
+        }
+    }
+
+    pub fn stop(&mut self) -> Result<(), String> {
+        self.reset_spectrum_timeline();
+        match self.native_transport.stop() {
+            Ok(()) => {
+                self.emit_event(EVT_STATE, "Null");
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("native transport stop failed: {e}");
+                self.set_error(msg.clone());
+                self.emit_event(EVT_ERROR, &msg);
+                Err(msg)
+            }
+        }
+    }
+
+    pub fn seek_seconds(&mut self, pos_s: f64) -> Result<(), String> {
+        let clamped = if pos_s.is_finite() { pos_s.max(0.0) } else { 0.0 };
+        let ms = (clamped * 1000.0) as u64;
+        match self.native_transport.seek_ms(ms) {
+            Ok(()) => {
+                self.reset_spectrum_timeline();
+                Ok(())
+            }
+            Err(e) => {
+                self.set_error(&e);
+                self.emit_event(EVT_ERROR, &e);
+                Err(e)
+            }
+        }
+    }
+
+    pub fn set_volume(&mut self, vol: f32) {
+        let v = if vol.is_finite() {
+            vol.clamp(0.0, 1.5)
+        } else {
+            1.0
+        };
+        self.native_transport.set_volume(v);
+    }
+
+    pub fn is_currently_playing(&self) -> bool {
+        self.native_transport.snapshot().state == native_transport::NativeTransportState::Playing
+    }
+
+    pub fn position_seconds(&self) -> f64 {
+        if self.native_eos_emitted {
+            return 0.0;
+        }
+        let snap = self.native_transport.snapshot();
+        let seek_offset = snap.seek_offset_s;
+        if let Some(runtime) = self.native_transport.runtime_info() {
+            let write_pos = runtime.feed.write_elapsed_s().unwrap_or(0.0);
+            if write_pos > 0.0 || snap.state != native_transport::NativeTransportState::Playing {
+                return seek_offset + write_pos;
+            }
+        }
+        let rate = snap
+            .stream_spec
+            .as_ref()
+            .map(|s| s.sample_rate as f64)
+            .unwrap_or(0.0);
+        if rate > 0.0 && snap.decoded_frame_count > 0 {
+            seek_offset + snap.decoded_frame_count as f64 / rate
+        } else {
+            seek_offset
+        }
+    }
+
+    pub fn duration_seconds(&self) -> f64 {
+        if self.native_eos_emitted {
+            return 0.0;
+        }
+        self.native_transport.snapshot().duration_s.unwrap_or(0.0)
+    }
+
+    pub fn last_error_msg(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 }
 
