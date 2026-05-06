@@ -473,6 +473,7 @@ impl SimpleComponent for AppController {
                 // the low end without burning CPU in the FFT.
                 e.set_spectrum_bands(256);
                 e.set_spectrum_enabled(true);
+                tracing::info!(driver, ?device, vol, "audio engine initialized");
                 Some(e)
             }
             Err(err) => {
@@ -1042,6 +1043,7 @@ impl SimpleComponent for AppController {
                 self.close_detail();
             }
             AppInput::PlayTrack { track_id } => {
+                tracing::info!(track_id, "PlayTrack received");
                 // Single-track play: clear the queue so Next/Prev can't
                 // pull stale rows from a previous list.
                 self.model.queue = Default::default();
@@ -1054,6 +1056,11 @@ impl SimpleComponent for AppController {
                 start_index,
                 source,
             } => {
+                tracing::info!(
+                    queue_len = tracks.len(),
+                    start_index,
+                    "PlayContext received"
+                );
                 if let Some(track) = tracks.get(start_index) {
                     let track_id = track.id;
                     self.model.queue.tracks = tracks;
@@ -1061,6 +1068,11 @@ impl SimpleComponent for AppController {
                     self.model.queue.shuffle_order = None;
                     self.model.playback.source = source;
                     self.start_play_track(track_id, sender.clone());
+                } else {
+                    tracing::warn!(
+                        start_index,
+                        "PlayContext: start_index out of bounds — dropping"
+                    );
                 }
             }
             AppInput::NowPlayingResolved {
@@ -1441,6 +1453,15 @@ impl AppController {
     fn start_play_track(&mut self, track_id: i64, sender: ComponentSender<Self>) {
         self.play_request_counter = self.play_request_counter.wrapping_add(1);
         let request_id = self.play_request_counter;
+        let quality = settings_str(&self.model.settings, "audio_quality")
+            .unwrap_or_else(|| "HI_RES_LOSSLESS".to_string());
+        tracing::info!(
+            track_id,
+            request_id,
+            %quality,
+            engine_present = self.engine.is_some(),
+            "start_play_track: spawning resolve worker"
+        );
         self.model.playback.transport = TransportState::Buffering;
         // Reset position so the seek bar doesn't show the previous
         // track's leftover progress while we wait for resolution.
@@ -1464,11 +1485,9 @@ impl AppController {
             .ok();
 
         let svc = self.session.clone();
-        // Phase 8-E reads quality from settings.audio_quality. Phase 8-G
-        // will add the per-track downgrade fallback chain that Python's
-        // _resolve_quality_chain handles.
-        let quality = settings_str(&self.model.settings, "audio_quality")
-            .unwrap_or_else(|| "HI_RES_LOSSLESS".to_string());
+        // Phase 8-G will add the per-track downgrade fallback chain
+        // that Python's `_resolve_quality_chain` handles. `quality`
+        // is captured from the diagnostic snapshot above.
         let sender_in = sender.input_sender().clone();
         spawn_blocking(
             move || svc.resolve_playback_blocking(track_id, &quality),
@@ -1612,13 +1631,19 @@ impl AppController {
             tracing::info!(track_id = track.id, %url, "no audio engine — staying in Buffering");
             return;
         };
+        tracing::info!(track_id = track.id, %url, "engine.set_uri_str + play");
         engine.set_uri_str(&url);
         match engine.play() {
             Ok(()) => {
+                tracing::info!(track_id = track.id, "engine.play() returned Ok");
                 self.model.playback.transport = TransportState::Playing;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "engine.play failed");
+                tracing::warn!(
+                    error = %e,
+                    last_engine_error = ?engine.last_error_msg(),
+                    "engine.play failed"
+                );
                 self.model.playback.transport = TransportState::Stopped;
             }
         }
