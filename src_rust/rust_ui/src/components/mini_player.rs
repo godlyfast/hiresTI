@@ -3,6 +3,8 @@
 //! `MiniPlayerOutput::*`. The actual playback driver lands in Phase 4
 //! when we hook up `rust_audio_core` via the Rust API.
 
+use std::path::PathBuf;
+
 use relm4::gtk::{
     self, prelude::*, Box as GtkBox, Button, Image, Label, Orientation, Scale,
 };
@@ -17,6 +19,9 @@ pub struct MiniPlayerModel {
     /// shows the pause icon and emits `Pause`; everything else shows
     /// play and emits `Play`.
     is_playing: bool,
+    /// Path to the cached album cover for the now-playing track, when
+    /// available. None falls back to the generic icon.
+    cover_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +29,7 @@ pub enum MiniPlayerInput {
     SetNowPlaying { title: String, artist: String },
     SetProgress(f64),
     SetIsPlaying(bool),
+    SetCover(Option<PathBuf>),
     /// Internal: the user clicked the central transport button. The
     /// model decides whether that means Play or Pause and emits the
     /// matching Output.
@@ -44,6 +50,7 @@ pub struct MiniPlayerWidgets {
     artist_label: Label,
     seek: Scale,
     play_btn: Button,
+    cover: Image,
 }
 
 impl SimpleComponent for MiniPlayerModel {
@@ -150,12 +157,14 @@ impl SimpleComponent for MiniPlayerModel {
             artist: String::new(),
             progress: 0.0,
             is_playing: false,
+            cover_path: None,
         };
         let widgets = MiniPlayerWidgets {
             title_label,
             artist_label,
             seek,
             play_btn,
+            cover,
         };
         ComponentParts { model, widgets }
     }
@@ -171,6 +180,9 @@ impl SimpleComponent for MiniPlayerModel {
             }
             MiniPlayerInput::SetIsPlaying(playing) => {
                 self.is_playing = playing;
+            }
+            MiniPlayerInput::SetCover(path) => {
+                self.cover_path = path;
             }
             MiniPlayerInput::TogglePlayClicked => {
                 let out = if self.is_playing {
@@ -193,6 +205,10 @@ impl SimpleComponent for MiniPlayerModel {
         } else {
             widgets.play_btn.set_icon_name("media-playback-start-symbolic");
             widgets.play_btn.set_tooltip_text(Some("Play"));
+        }
+        match &self.cover_path {
+            Some(p) => widgets.cover.set_from_file(Some(p)),
+            None => widgets.cover.set_icon_name(Some("audio-x-generic-symbolic")),
         }
     }
 }

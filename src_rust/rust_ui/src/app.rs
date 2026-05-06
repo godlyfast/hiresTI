@@ -466,6 +466,10 @@ impl SimpleComponent for AppController {
                     .sender()
                     .send(MiniPlayerInput::SetProgress(0.0))
                     .ok();
+                self.mini
+                    .sender()
+                    .send(MiniPlayerInput::SetCover(None))
+                    .ok();
                 self.detail = None;
                 self.content
                     .sender()
@@ -631,7 +635,7 @@ impl SimpleComponent for AppController {
                 request_id,
                 resolved,
             } => {
-                self.handle_now_playing_resolved(request_id, resolved);
+                self.handle_now_playing_resolved(request_id, resolved, sender.clone());
             }
             AppInput::NowPlayingFailed { request_id, error } => {
                 if request_id != self.play_request_counter {
@@ -642,6 +646,15 @@ impl SimpleComponent for AppController {
             }
             AppInput::PlaybackTick => {
                 self.tick_playback_position();
+            }
+            AppInput::NowPlayingCoverReady { request_id, path } => {
+                if request_id != self.play_request_counter {
+                    return;
+                }
+                self.mini
+                    .sender()
+                    .send(MiniPlayerInput::SetCover(Some(path)))
+                    .ok();
             }
         }
     }
@@ -806,6 +819,12 @@ impl AppController {
             .sender()
             .send(MiniPlayerInput::SetProgress(0.0))
             .ok();
+        // Drop the previous track's cover so the mini-player doesn't
+        // show the wrong artwork during the resolve gap.
+        self.mini
+            .sender()
+            .send(MiniPlayerInput::SetCover(None))
+            .ok();
 
         let svc = self.session.clone();
         // Phase 7-C uses HI_RES_LOSSLESS unconditionally. Phase 8 wires
@@ -831,7 +850,12 @@ impl AppController {
         );
     }
 
-    fn handle_now_playing_resolved(&mut self, request_id: u64, resolved: ResolvedPlayback) {
+    fn handle_now_playing_resolved(
+        &mut self,
+        request_id: u64,
+        resolved: ResolvedPlayback,
+        sender: ComponentSender<Self>,
+    ) {
         if request_id != self.play_request_counter {
             tracing::debug!(request_id, "stale play resolve dropped");
             return;
@@ -862,6 +886,30 @@ impl AppController {
         self.model.playback.current_track = Some(track.clone());
         self.model.playback.duration =
             std::time::Duration::from_secs(track.duration.max(0) as u64);
+
+        // Kick off the mini-player cover fetch in parallel with the
+        // engine handoff. Album cover lives on the album-ref so we can
+        // grab it without an extra fetch_album call.
+        if let Some(cover_id) = track
+            .album
+            .as_ref()
+            .and_then(|a| a.cover.clone())
+            .filter(|s| !s.is_empty())
+        {
+            let req = request_id;
+            let app_in = sender.input_sender().clone();
+            spawn_blocking(
+                move || crate::services::covers::fetch_cover_blocking(&cover_id, 80),
+                move |result| {
+                    if let Ok(path) = result {
+                        let _ = app_in.send(AppInput::NowPlayingCoverReady {
+                            request_id: req,
+                            path,
+                        });
+                    }
+                },
+            );
+        }
 
         // Hand the URL to rust_audio_core. The resolver already falls
         // back to the legacy URL endpoint for MPD manifests so we

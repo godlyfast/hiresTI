@@ -111,6 +111,13 @@ pub enum AppInput {
     /// engine's current play head. Keeps the mini-player progress
     /// scrubbing in real time without per-decoded-frame events.
     PlaybackTick,
+    /// Now-playing track's album cover finished downloading. The
+    /// request_id matches the play counter so out-of-order resolves
+    /// don't push a stale cover into the mini-player.
+    NowPlayingCoverReady {
+        request_id: u64,
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Clone)]
