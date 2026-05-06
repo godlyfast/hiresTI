@@ -65,6 +65,7 @@ use crate::components::views::tabbed_discovery::{
 use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
+use crate::services::alsa_reserve::{self, AlsaReserveService};
 use crate::services::lyrics::{LyricsService, ParsedLyrics};
 use crate::services::mpris::{self, MprisHandle, MprisMetadata, MprisTransport};
 use crate::services::scrobbler::{ScrobbleTrack, ScrobblerConfig, ScrobblerService};
@@ -174,6 +175,12 @@ pub struct AppController {
     /// Index of the line currently shown in the lyric strip. Tracked
     /// so PlaybackTick only re-pushes when the active line changes.
     current_lyric_idx: Option<usize>,
+
+    /// ALSA `org.freedesktop.ReserveDevice1` service. Cheap to clone;
+    /// the worker thread it backs is shared across switches. None
+    /// when the dedicated thread couldn't start (rare — unbounded
+    /// channel + thread spawn).
+    alsa_reserve: Option<AlsaReserveService>,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -511,6 +518,29 @@ impl SimpleComponent for AppController {
         let scrobbler = ScrobblerService::new();
         scrobbler.configure(scrobbler_config_from(&init.settings));
 
+        // ---- ALSA reservation -----------------------------------------
+        // The service start is cheap (just a thread + unbounded
+        // channel); actual D-Bus traffic only happens on `acquire`.
+        // We hold the handle for the lifetime of AppController.
+        let alsa_reserve = match alsa_reserve::start() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::info!(error = %e, "alsa-reserve unavailable");
+                None
+            }
+        };
+
+        // If the persisted output is ALSA exclusive on a `hw:N` device,
+        // acquire the reservation up front so the engine's first
+        // open isn't EBUSY against a PipeWire grab.
+        if let Some(svc) = alsa_reserve.as_ref() {
+            if let Some(card) = alsa_reserve_card_for(&init.settings) {
+                if svc.acquire(card, Duration::from_millis(800)) {
+                    tracing::info!(card, "alsa-reserve: held for cold-start output");
+                }
+            }
+        }
+
         // Window close → hide-to-tray when tray is up; otherwise
         // standard quit behavior. The user can always exit via
         // tray "Quit" or by re-running and quitting properly.
@@ -571,6 +601,7 @@ impl SimpleComponent for AppController {
             lyric_strip,
             current_lyrics: None,
             current_lyric_idx: None,
+            alsa_reserve,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -616,6 +647,26 @@ impl SimpleComponent for AppController {
                 // Other audio settings (latency, mmap rt, exclusive)
                 // need a fresh engine and stay deferred to next launch.
                 if driver_changed {
+                    // Drop any ALSA reservation tied to the previous
+                    // driver before retargeting the engine. acquire() on
+                    // a card we don't already hold cleanly releases the
+                    // old card first, so an explicit release here is
+                    // mainly for the no-card-needed case.
+                    let new_card = alsa_reserve_card_for(&self.model.settings);
+                    if let Some(svc) = self.alsa_reserve.as_ref() {
+                        match new_card {
+                            Some(card) => {
+                                if svc.acquire(card, Duration::from_millis(800)) {
+                                    tracing::info!(card, "alsa-reserve: held for live driver switch");
+                                }
+                            }
+                            None => {
+                                if svc.is_held() {
+                                    svc.release();
+                                }
+                            }
+                        }
+                    }
                     if let Some(engine) = self.engine.as_mut() {
                         let driver = settings_str(&self.model.settings, "driver")
                             .unwrap_or_default();
@@ -1015,6 +1066,9 @@ impl SimpleComponent for AppController {
                 // Drop the tray (shutdown thread) then close all
                 // top-level windows so the GTK main loop exits.
                 self.tray = None;
+                if let Some(svc) = self.alsa_reserve.as_ref() {
+                    svc.release();
+                }
                 if let Some(app) = self.window_for_dialogs.application() {
                     app.quit();
                 } else {
@@ -1698,6 +1752,26 @@ fn scrobbler_config_from(s: &Settings) -> ScrobblerConfig {
         listenbrainz_enabled: settings_bool(s, "scrobble_listenbrainz_enabled"),
         listenbrainz_token: settings_str(s, "scrobble_listenbrainz_token").unwrap_or_default(),
     }
+}
+
+/// Inspect `settings.extra` and return the ALSA card number we
+/// should reserve, or `None` if the current output isn't ALSA-family
+/// or doesn't target a specific `hw:N` device.
+fn alsa_reserve_card_for(s: &Settings) -> Option<u32> {
+    let driver = settings_str(s, "driver").unwrap_or_default().to_lowercase();
+    if !driver.contains("alsa") && !driver.is_empty() && !driver.starts_with("auto") {
+        return None;
+    }
+    let device = settings_str(s, "device").unwrap_or_default();
+    parse_hw_card(&device)
+}
+
+/// `hw:2` / `hw:2,0` / `hw:CARD=foo` → 2 / 2 / None.
+fn parse_hw_card(device: &str) -> Option<u32> {
+    let trimmed = device.trim();
+    let stripped = trimmed.strip_prefix("hw:").or_else(|| trimmed.strip_prefix("plughw:"))?;
+    let head = stripped.split(',').next().unwrap_or("");
+    head.parse::<u32>().ok()
 }
 
 fn make_lib_forward() -> impl Fn(LibraryViewOutput) -> AppInput + 'static + Copy {

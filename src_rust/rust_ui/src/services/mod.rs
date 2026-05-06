@@ -5,6 +5,7 @@
 //! threading shims the UI needs (blocking HTTP calls dispatched to a
 //! worker thread, etc.).
 
+pub mod alsa_reserve;
 pub mod covers;
 pub mod dsp_preset;
 pub mod lyrics;
