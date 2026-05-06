@@ -10,6 +10,8 @@
 
 use relm4::gtk::{self, prelude::*, Box as GtkBox, Label, Orientation, Spinner};
 
+use rust_tidal_core::api::{Album, ArtistRef, Track};
+
 #[derive(Debug, Clone, Default)]
 pub enum ViewLoadState {
     #[default]
@@ -86,6 +88,43 @@ pub fn build_empty_widget(message: &str) -> GtkBox {
         .build();
     wrap.append(&label);
     wrap
+}
+
+/// `mm:ss` for the small-screen track-list rows. Negative values clamp to 0.
+pub fn format_duration(seconds: i32) -> String {
+    let s = seconds.max(0);
+    let m = s / 60;
+    let r = s % 60;
+    format!("{m}:{r:02}")
+}
+
+/// Best-effort "primary artist" name picker — uses `artist` if populated,
+/// otherwise joins the `artists` list. Returns "" when no artist info is
+/// present so callers can render a blank slot rather than "Unknown".
+pub fn primary_artist_name(primary: Option<&ArtistRef>, fallback: &[ArtistRef]) -> String {
+    if let Some(a) = primary {
+        if !a.name.is_empty() {
+            return a.name.clone();
+        }
+    }
+    let names: Vec<&str> = fallback
+        .iter()
+        .map(|a| a.name.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        names.join(", ")
+    }
+}
+
+pub fn track_artist_name(track: &Track) -> String {
+    primary_artist_name(track.artist.as_ref(), &track.artists)
+}
+
+pub fn album_artist_name(album: &Album) -> String {
+    primary_artist_name(album.artist.as_ref(), &album.artists)
 }
 
 /// Centered error message + (later) retry button.

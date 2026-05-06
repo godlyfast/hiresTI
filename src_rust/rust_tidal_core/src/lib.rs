@@ -28,6 +28,7 @@ pub mod api {
     pub use crate::favorites::{ListArgs, PageResponse};
     pub use crate::models::{Album, Artist, ArtistRef, Folder, Mix, Playlist, Track, Video};
     pub use crate::pages::{Card, More, Page, PageCategory, PageItem};
+    pub use crate::tail::Bio;
     pub use crate::request::{RequestArgs, ResponseJson};
     pub use crate::session::{
         read_persisted_token, write_persisted_token, PersistedToken, Session, UserInfo,

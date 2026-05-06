@@ -4,11 +4,14 @@
 //! state primitives (`ViewLoadState`, the `LibraryViewOutput`
 //! navigation enum) defined in `common`.
 
+pub mod album_detail;
 pub mod albums;
+pub mod artist_detail;
 pub mod artists;
 pub mod common;
 pub mod discovery;
 pub mod history;
 pub mod mixes;
+pub mod playlist_detail;
 pub mod playlists;
 pub mod tracks;

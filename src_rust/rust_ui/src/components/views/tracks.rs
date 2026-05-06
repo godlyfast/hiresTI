@@ -9,8 +9,8 @@ use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 use rust_tidal_core::api::Track;
 
 use crate::components::views::common::{
-    build_empty_widget, build_error_widget, build_loading_widget, LibraryViewOutput,
-    ViewLoadState,
+    build_empty_widget, build_error_widget, build_loading_widget, format_duration,
+    track_artist_name, LibraryViewOutput, ViewLoadState,
 };
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
 
@@ -215,28 +215,3 @@ fn build_track_row(idx: usize, track: &Track, sender: ComponentSender<TracksView
     row
 }
 
-fn track_artist_name(track: &Track) -> String {
-    if let Some(a) = track.artist.as_ref() {
-        if !a.name.is_empty() {
-            return a.name.clone();
-        }
-    }
-    let names: Vec<&str> = track
-        .artists
-        .iter()
-        .map(|a| a.name.as_str())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if !names.is_empty() {
-        names.join(", ")
-    } else {
-        String::new()
-    }
-}
-
-fn format_duration(seconds: i32) -> String {
-    let s = seconds.max(0);
-    let m = s / 60;
-    let r = s % 60;
-    format!("{m}:{r:02}")
-}

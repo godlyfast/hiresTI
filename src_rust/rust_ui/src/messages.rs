@@ -79,6 +79,11 @@ pub enum AppInput {
     OpenPlaylist { uuid: String, title: String },
     OpenMix { id: String, title: String },
     PlayTrack { track_id: i64 },
+
+    // ---- Detail navigation (Phase 7-A) -----------------------------
+    /// Pop the currently-open detail surface and return to the active
+    /// nav target. Header back-button + sidebar clicks both emit this.
+    CloseDetail,
 }
 
 #[derive(Debug, Clone)]

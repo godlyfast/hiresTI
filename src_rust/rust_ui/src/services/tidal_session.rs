@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::thread;
 
 use rust_tidal_core::api::{
-    read_persisted_token, write_persisted_token, Album, Artist, DeviceLogin, ListArgs, Mix, Page,
-    PersistedToken, Playlist, RequestArgs, RtcError, Session, Track, UserInfo,
+    read_persisted_token, write_persisted_token, Album, Artist, Bio, DeviceLogin, ListArgs, Mix,
+    Page, PersistedToken, Playlist, RequestArgs, RtcError, Session, Track, UserInfo,
 };
 
 use crate::error::{AppError, AppResult};
@@ -147,6 +147,47 @@ impl TidalSessionService {
     }
     pub fn list_user_playlists_blocking(&self) -> Result<Vec<Playlist>, RtcError> {
         drain_pages(|args| self.session.list_user_playlists("root", args))
+    }
+
+    // ---- Detail surfaces (Phase 7) ---------------------------------
+
+    pub fn fetch_album_blocking(&self, id: i64) -> Result<Album, RtcError> {
+        self.session.fetch_album(id)
+    }
+
+    pub fn list_album_tracks_blocking(&self, id: i64) -> Result<Vec<Track>, RtcError> {
+        drain_pages(|args| self.session.album_tracks(id, args))
+    }
+
+    pub fn fetch_artist_blocking(&self, id: i64) -> Result<Artist, RtcError> {
+        self.session.fetch_artist(id)
+    }
+
+    pub fn fetch_playlist_blocking(&self, id: &str) -> Result<Playlist, RtcError> {
+        self.session.fetch_playlist(id)
+    }
+
+    pub fn list_playlist_tracks_blocking(&self, id: &str) -> Result<Vec<Track>, RtcError> {
+        drain_pages(|args| self.session.playlist_tracks(id, args))
+    }
+
+    pub fn artist_top_tracks_blocking(&self, id: i64) -> Result<Vec<Track>, RtcError> {
+        // Just the first page (50) — these surfaces never want more.
+        let args = ListArgs {
+            limit: 50,
+            offset: 0,
+            order: None,
+            order_direction: None,
+        };
+        Ok(self.session.artist_top_tracks(id, &args)?.items)
+    }
+
+    pub fn artist_albums_blocking(&self, id: i64) -> Result<Vec<Album>, RtcError> {
+        drain_pages(|args| self.session.artist_albums(id, "all", args))
+    }
+
+    pub fn artist_bio_blocking(&self, id: i64) -> Result<Bio, RtcError> {
+        self.session.artist_bio(id)
     }
 
     // ---- Discovery pages (Phase 6) ---------------------------------

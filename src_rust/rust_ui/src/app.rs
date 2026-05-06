@@ -31,7 +31,9 @@ use crate::components::login_dialog::{
 };
 use crate::components::mini_player::{MiniPlayerModel, MiniPlayerOutput};
 use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
+use crate::components::views::album_detail::{AlbumDetailInit, AlbumDetailViewModel};
 use crate::components::views::albums::{AlbumsViewInput, AlbumsViewModel};
+use crate::components::views::artist_detail::{ArtistDetailInit, ArtistDetailViewModel};
 use crate::components::views::artists::{ArtistsViewInput, ArtistsViewModel};
 use crate::components::views::common::LibraryViewOutput;
 use crate::components::views::discovery::{
@@ -39,6 +41,7 @@ use crate::components::views::discovery::{
 };
 use crate::components::views::history::{HistoryViewInput, HistoryViewModel};
 use crate::components::views::mixes::{MixesViewInput, MixesViewModel};
+use crate::components::views::playlist_detail::{PlaylistDetailInit, PlaylistDetailViewModel};
 use crate::components::views::playlists::{PlaylistsViewInput, PlaylistsViewModel};
 use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
@@ -81,6 +84,29 @@ pub struct AppController {
     new_view: Controller<DiscoveryViewModel>,
     top_view: Controller<DiscoveryViewModel>,
     hires_view: Controller<DiscoveryViewModel>,
+
+    /// Currently displayed detail page, if any. Replacing the variant
+    /// drops the previous Controller (and its widget — ContentStack
+    /// removes it from the stack via SetDetail).
+    detail: Option<DetailPage>,
+}
+
+/// Variants of the global detail surface. Each holds the active
+/// Controller so the widget tree stays alive while the page is open.
+enum DetailPage {
+    Album(Controller<AlbumDetailViewModel>),
+    Playlist(Controller<PlaylistDetailViewModel>),
+    Artist(Controller<ArtistDetailViewModel>),
+}
+
+impl DetailPage {
+    fn widget(&self) -> relm4::gtk::Widget {
+        match self {
+            DetailPage::Album(c) => c.widget().clone().into(),
+            DetailPage::Playlist(c) => c.widget().clone().into(),
+            DetailPage::Artist(c) => c.widget().clone().into(),
+        }
+    }
 }
 
 pub struct AppWidgets {
@@ -119,6 +145,7 @@ impl SimpleComponent for AppController {
                 HeaderOutput::LoginRequested => AppInput::RequestLogin,
                 HeaderOutput::OpenSettings => AppInput::OpenSettings,
                 HeaderOutput::OpenAbout => AppInput::OpenAbout,
+                HeaderOutput::BackPressed => AppInput::CloseDetail,
             },
         );
 
@@ -131,15 +158,7 @@ impl SimpleComponent for AppController {
         // Library view controllers. Each gets a clone of the session
         // service. They forward LibraryViewOutput up into AppInput so
         // the root can dispatch detail/play actions.
-        let lib_forward = |out: LibraryViewOutput| match out {
-            LibraryViewOutput::OpenAlbum { id, title } => AppInput::OpenAlbum { id, title },
-            LibraryViewOutput::OpenArtist { id, name } => AppInput::OpenArtist { id, name },
-            LibraryViewOutput::OpenPlaylist { uuid, title } => {
-                AppInput::OpenPlaylist { uuid, title }
-            }
-            LibraryViewOutput::OpenMix { id, title } => AppInput::OpenMix { id, title },
-            LibraryViewOutput::PlayTrack { track_id } => AppInput::PlayTrack { track_id },
-        };
+        let lib_forward = make_lib_forward();
         let albums_view = AlbumsViewModel::builder()
             .launch(session.clone())
             .forward(sender.input_sender(), lib_forward);
@@ -293,6 +312,7 @@ impl SimpleComponent for AppController {
             new_view,
             top_view,
             hires_view,
+            detail: None,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -304,6 +324,10 @@ impl SimpleComponent for AppController {
                 self.model.current_nav = target;
                 self.model.settings.last_nav = target.as_id().into();
                 self.persist_settings();
+                // Sidebar nav drops any open detail surface. ContentStack
+                // already clears its detail child on Show(); we have to
+                // drop our owning Controller too.
+                self.detail = None;
                 self.sidebar.sender().send(SidebarInput::SetActive(target)).ok();
                 self.content.sender().send(ContentStackInput::Show(target)).ok();
                 // First navigation to a library view triggers a fetch.
@@ -407,16 +431,29 @@ impl SimpleComponent for AppController {
             }
 
             AppInput::OpenAlbum { id, title } => {
-                tracing::info!(%id, %title, "open album (Phase 7 wires the detail view)");
+                let parsed = id.parse::<i64>().ok();
+                if let Some(album_id) = parsed {
+                    self.open_album_detail(album_id, title, sender.clone());
+                } else {
+                    tracing::warn!(%id, "ignoring OpenAlbum: id is not a numeric album id");
+                }
             }
             AppInput::OpenArtist { id, name } => {
-                tracing::info!(%id, %name, "open artist (Phase 7 wires the detail view)");
+                let parsed = id.parse::<i64>().ok();
+                if let Some(artist_id) = parsed {
+                    self.open_artist_detail(artist_id, name, sender.clone());
+                } else {
+                    tracing::warn!(%id, "ignoring OpenArtist: id is not a numeric artist id");
+                }
             }
             AppInput::OpenPlaylist { uuid, title } => {
-                tracing::info!(%uuid, %title, "open playlist (Phase 7 wires the detail view)");
+                self.open_playlist_detail(uuid, title, sender.clone());
             }
             AppInput::OpenMix { id, title } => {
-                tracing::info!(%id, %title, "open mix (Phase 7 wires the detail view)");
+                tracing::info!(%id, %title, "open mix (Phase 7-B wires the mix detail view)");
+            }
+            AppInput::CloseDetail => {
+                self.close_detail();
             }
             AppInput::PlayTrack { track_id } => {
                 tracing::info!(track_id, "play track (Phase 7 wires the playback path)");
@@ -435,6 +472,10 @@ impl SimpleComponent for AppController {
         self.header
             .sender()
             .send(HeaderInput::SetUserDisplay(display))
+            .ok();
+        self.header
+            .sender()
+            .send(HeaderInput::SetDetailOpen(self.detail.is_some()))
             .ok();
     }
 }
@@ -488,6 +529,80 @@ impl AppController {
             // need their own component shape — Phase 6.5.
             NavTarget::Genres | NavTarget::Decades | NavTarget::Moods => {}
         }
+    }
+
+    fn open_album_detail(
+        &mut self,
+        album_id: i64,
+        title: String,
+        sender: ComponentSender<Self>,
+    ) {
+        let lib_forward = make_lib_forward();
+        let view = AlbumDetailViewModel::builder()
+            .launch(AlbumDetailInit {
+                session: self.session.clone(),
+                album_id,
+                initial_title: title,
+            })
+            .forward(sender.input_sender(), lib_forward);
+        self.install_detail(DetailPage::Album(view));
+    }
+
+    fn open_playlist_detail(
+        &mut self,
+        playlist_id: String,
+        title: String,
+        sender: ComponentSender<Self>,
+    ) {
+        let lib_forward = make_lib_forward();
+        let view = PlaylistDetailViewModel::builder()
+            .launch(PlaylistDetailInit {
+                session: self.session.clone(),
+                playlist_id,
+                initial_title: title,
+            })
+            .forward(sender.input_sender(), lib_forward);
+        self.install_detail(DetailPage::Playlist(view));
+    }
+
+    fn open_artist_detail(
+        &mut self,
+        artist_id: i64,
+        name: String,
+        sender: ComponentSender<Self>,
+    ) {
+        let lib_forward = make_lib_forward();
+        let view = ArtistDetailViewModel::builder()
+            .launch(ArtistDetailInit {
+                session: self.session.clone(),
+                artist_id,
+                initial_name: name,
+            })
+            .forward(sender.input_sender(), lib_forward);
+        self.install_detail(DetailPage::Artist(view));
+    }
+
+    fn install_detail(&mut self, page: DetailPage) {
+        let widget = page.widget();
+        // Drop the previous controller (if any) before installing the new
+        // one — its widget is still in the stack until SetDetail removes
+        // it, but ContentStack handles the swap atomically.
+        self.detail = Some(page);
+        self.content
+            .sender()
+            .send(ContentStackInput::SetDetail(Some(widget)))
+            .ok();
+    }
+
+    fn close_detail(&mut self) {
+        if self.detail.is_none() {
+            return;
+        }
+        self.content
+            .sender()
+            .send(ContentStackInput::SetDetail(None))
+            .ok();
+        self.detail = None;
     }
 
     fn apply_auth_result(&mut self, profile: Option<UserProfile>) {
@@ -570,6 +685,22 @@ impl AppController {
             );
             glib::ControlFlow::Continue
         });
+    }
+}
+
+/// LibraryViewOutput → AppInput translator. Every library and detail
+/// view forwards through this so a click on an artist link inside an
+/// album-detail page reaches the same root handler as a click on an
+/// artist tile in the Artists library page.
+fn make_lib_forward() -> impl Fn(LibraryViewOutput) -> AppInput + 'static + Copy {
+    |out| match out {
+        LibraryViewOutput::OpenAlbum { id, title } => AppInput::OpenAlbum { id, title },
+        LibraryViewOutput::OpenArtist { id, name } => AppInput::OpenArtist { id, name },
+        LibraryViewOutput::OpenPlaylist { uuid, title } => {
+            AppInput::OpenPlaylist { uuid, title }
+        }
+        LibraryViewOutput::OpenMix { id, title } => AppInput::OpenMix { id, title },
+        LibraryViewOutput::PlayTrack { track_id } => AppInput::PlayTrack { track_id },
     }
 }
 

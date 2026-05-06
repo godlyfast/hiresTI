@@ -13,12 +13,16 @@ use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
 pub struct HeaderModel {
     logged_in_label: String,
+    /// True while a detail page is open. Drives the back-button visibility
+    /// — the root flips this via `SetDetailOpen` whenever it installs or
+    /// closes a detail surface.
+    detail_open: bool,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // SetUserDisplay sender wires in Phase 4 (auth flow)
 pub enum HeaderInput {
     SetUserDisplay(Option<String>),
+    SetDetailOpen(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -27,11 +31,13 @@ pub enum HeaderOutput {
     LoginRequested,
     OpenSettings,
     OpenAbout,
+    BackPressed,
 }
 
 pub struct HeaderWidgets {
     bar: HeaderBar,
     user_label: Label,
+    back_btn: Button,
 }
 
 impl SimpleComponent for HeaderModel {
@@ -50,6 +56,18 @@ impl SimpleComponent for HeaderModel {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        // Back button: hidden until a detail surface opens.
+        let back_btn = Button::builder()
+            .icon_name("go-previous-symbolic")
+            .tooltip_text("Back")
+            .visible(false)
+            .build();
+        let s = sender.clone();
+        back_btn.connect_clicked(move |_| {
+            let _ = s.output(HeaderOutput::BackPressed);
+        });
+        root.pack_start(&back_btn);
+
         let title = GtkBox::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
@@ -100,10 +118,12 @@ impl SimpleComponent for HeaderModel {
 
         let model = Self {
             logged_in_label: "Login".into(),
+            detail_open: false,
         };
         let widgets = HeaderWidgets {
             bar: root,
             user_label,
+            back_btn,
         };
         ComponentParts { model, widgets }
     }
@@ -116,13 +136,15 @@ impl SimpleComponent for HeaderModel {
                     .map(|n| format!("Hi, {n}"))
                     .unwrap_or_else(|| "Login".into());
             }
+            HeaderInput::SetDetailOpen(open) => {
+                self.detail_open = open;
+            }
         }
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: ComponentSender<Self>) {
         widgets.user_label.set_label(&self.logged_in_label);
-        // touch `bar` to keep the field referenced (also lets future
-        // additions flip header chrome on auth state changes).
+        widgets.back_btn.set_visible(self.detail_open);
         let _ = &widgets.bar;
     }
 }
