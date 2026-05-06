@@ -2097,12 +2097,35 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+/// Bundled stylesheet ported from the Python `src/ui/config.py`
+/// `CSS_DATA` block. Embedded at compile time so the binary stays
+/// self-contained.
+const APP_STYLESHEET: &str = include_str!("../assets/style.css");
+
 /// Build the `Adw.Application`, wire the root component, and run the
 /// GTK main loop. Called from `main()` once logging + paths are set up.
 pub fn run(initial: Settings) -> i32 {
     let app = Application::builder()
         .application_id("com.hiresti.player")
         .build();
+
+    // Hook the `startup` signal so the CSS provider attaches to the
+    // default display once GTK has finished initializing it. Doing
+    // this before `RelmApp::run` keeps the ordering correct without
+    // having to thread the load through AppController::init.
+    app.connect_startup(|_| {
+        if let Some(display) = relm4::gtk::gdk::Display::default() {
+            let provider = relm4::gtk::CssProvider::new();
+            provider.load_from_data(APP_STYLESHEET);
+            relm4::gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                relm4::gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        } else {
+            tracing::warn!("no GDK display at startup; stylesheet not attached");
+        }
+    });
 
     let runner = relm4::RelmApp::from_app(app);
     runner.run::<AppController>(AppModel::from_settings(initial));
