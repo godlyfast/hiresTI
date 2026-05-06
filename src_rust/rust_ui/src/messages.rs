@@ -43,6 +43,42 @@ pub enum AppInput {
     TransportNext,
     TransportPrev,
     TransportSeek(f64),
+
+    // ---- Auth flow (Phase 4) ---------------------------------------
+    /// Result of the cold-start token restore attempt. None = no token
+    /// on disk, or token rejected by /v1/sessions; Some = logged in.
+    AuthRestoreResult(Option<crate::state::auth::UserProfile>),
+
+    /// User pressed Login while logged in — log out instead.
+    LogoutRequested,
+
+    /// Device-code start finished. Show the dialog with the
+    /// verification URL + user code; start polling.
+    AuthDeviceStarted(rust_tidal_core::api::DeviceLogin),
+
+    /// Device-code start failed. Surface the error in the header
+    /// (and Phase 8 surfaces it in a notification toast).
+    AuthDeviceStartFailed(String),
+
+    /// One poll tick completed; either still waiting or logged in.
+    AuthDevicePollTick(AuthPollOutcome),
+
+    /// User closed the login dialog before authorizing — abort the
+    /// pending poll loop.
+    AuthDeviceCancelled,
+
+    /// Open `url` in the user's default browser (xdg-open).
+    OpenBrowser(String),
+
+    /// Copy `text` to the system clipboard via the default Gdk display.
+    CopyToClipboard(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum AuthPollOutcome {
+    StillPending,
+    LoggedIn(crate::state::auth::UserProfile),
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

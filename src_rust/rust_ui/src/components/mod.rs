@@ -8,5 +8,6 @@
 
 pub mod content_stack;
 pub mod header;
+pub mod login_dialog;
 pub mod mini_player;
 pub mod sidebar;

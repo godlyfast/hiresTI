@@ -14,6 +14,7 @@ mod error;
 mod messages;
 mod model;
 mod paths;
+mod services;
 mod settings;
 mod state;
 

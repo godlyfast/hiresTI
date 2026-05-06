@@ -111,6 +111,40 @@ impl Session {
         Ok(user)
     }
 
+    /// Cold-start friendly: set `token` in state first, then validate
+    /// against /v1/sessions. If validation fails with an auth error and
+    /// the persisted token had a refresh_token, run the refresh flow
+    /// in-place. The returned `UserInfo` reflects the (possibly
+    /// refreshed) live session; on success the new token replaces the
+    /// stored one so callers can persist it.
+    pub fn restore_with_refresh(&self, token: TokenInfo) -> RtcResult<UserInfo> {
+        // Stage the token first so refresh_token() can read its
+        // refresh_token field if the access-token validation fails.
+        {
+            let mut state = self.inner.lock();
+            state.token = Some(token.clone());
+        }
+        match self.fetch_user_info(&token.access_token) {
+            Ok(user) => {
+                let mut state = self.inner.lock();
+                state.user = Some(user.clone());
+                Ok(user)
+            }
+            Err(RtcError::Auth(_)) => {
+                // Access token bad; try refresh.
+                let _ = self.refresh_token()?;
+                self.user_snapshot()
+                    .ok_or_else(|| RtcError::Auth("refresh ok but no user info".into()))
+            }
+            Err(e) => {
+                // Network / parse error — clear the staged token so
+                // a subsequent retry doesn't see stale state.
+                self.inner.lock().token = None;
+                Err(e)
+            }
+        }
+    }
+
     pub fn token_snapshot(&self) -> Option<TokenInfo> {
         self.inner.lock().token.clone()
     }

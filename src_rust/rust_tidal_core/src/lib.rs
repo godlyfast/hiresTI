@@ -22,9 +22,13 @@ mod tail;
 // down stays the canonical surface for the legacy ctypes path; Rust callers
 // avoid the JSON round-trip by going through these direct types instead.
 pub mod api {
+    pub use crate::auth::DeviceLogin;
     pub use crate::error::{RtcError, RtcResult};
     pub use crate::models::{Album, Artist, Mix, Playlist, Track};
-    pub use crate::session::{Session, UserInfo};
+    pub use crate::request::{RequestArgs, ResponseJson};
+    pub use crate::session::{
+        read_persisted_token, write_persisted_token, PersistedToken, Session, UserInfo,
+    };
 }
 
 use std::ffi::{CStr, CString};

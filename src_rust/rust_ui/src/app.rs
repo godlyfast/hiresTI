@@ -1,17 +1,21 @@
 //! Root Relm4 component. Owns the `AppModel` and composes the four
 //! top-level region components (header, sidebar, content stack, mini
-//! player) via `Controller<T>`. Each child emits an `Output` enum that
-//! a small `forward()` adapter translates into `AppInput`.
+//! player) plus the modal login dialog. Each child emits an `Output`
+//! enum that a small `forward()` adapter translates into `AppInput`.
 //!
-//! Phase 3 deliverable: the app boots, the sidebar shows three sections
-//! with 13 navigation rows, clicking a row switches the content stack
-//! and persists `settings.last_nav`. Header search / login / settings
-//! menu / mini player buttons are wired to outputs the root logs but
-//! doesn't yet act on (Phase 4+ work).
+//! Phase 4 wires the auth backbone: cold-start token restore, device-
+//! code OAuth login flow with polling, header label sync. Network calls
+//! run on background threads; results return through the input sender,
+//! which Relm4 marshals to the GTK main loop.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use libadwaita::prelude::*;
 use libadwaita::{ApplicationWindow, ToolbarView};
 use relm4::adw::Application;
+use relm4::gtk::glib;
 use relm4::gtk::{Box as GtkBox, Orientation, Paned, Separator};
 use relm4::{
     Component, ComponentController, ComponentParts, ComponentSender, Controller,
@@ -19,25 +23,34 @@ use relm4::{
 };
 
 use crate::components::content_stack::{ContentStackInput, ContentStackModel};
-use crate::components::header::{HeaderModel, HeaderOutput};
+use crate::components::header::{HeaderInput, HeaderModel, HeaderOutput};
+use crate::components::login_dialog::{
+    LoginDialogInput, LoginDialogModel, LoginDialogOutput,
+};
 use crate::components::mini_player::{MiniPlayerModel, MiniPlayerOutput};
 use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
-use crate::messages::AppInput;
+use crate::messages::{AppInput, AuthPollOutcome};
 use crate::model::AppModel;
+use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
 use crate::settings::Settings;
+use crate::state::auth::{AuthStatus, UserProfile};
 
 pub struct AppController {
     model: AppModel,
-    // Header / mini hold their controllers alive so the widgets stay
-    // mounted; we don't yet send messages back into them in Phase 3,
-    // but Phase 4+ will (auth display name → header, transport state →
-    // mini). Suppress dead-code until then.
+    /// Owns the rust_tidal_core Session and persistence.
+    session: TidalSessionService,
+    /// Set to true when an in-flight device-poll loop should stop. The
+    /// timer task checks this each tick and exits if set; user pressing
+    /// Cancel or the auth flow finishing both flip it.
+    poll_cancelled: Arc<AtomicBool>,
+
     #[allow(dead_code)]
     header: Controller<HeaderModel>,
     sidebar: Controller<SidebarModel>,
     content: Controller<ContentStackModel>,
     #[allow(dead_code)]
     mini: Controller<MiniPlayerModel>,
+    login: Controller<LoginDialogModel>,
 }
 
 pub struct AppWidgets {
@@ -64,8 +77,9 @@ impl SimpleComponent for AppController {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        // Apply window geometry from persisted settings.
         root.set_default_size(init.settings.window_width, init.settings.window_height);
+
+        let session = TidalSessionService::new();
 
         // ---- Children -------------------------------------------------
         let header = HeaderModel::builder().launch(()).forward(
@@ -99,16 +113,22 @@ impl SimpleComponent for AppController {
             },
         );
 
+        let login = LoginDialogModel::builder().launch(()).forward(
+            sender.input_sender(),
+            |out| match out {
+                LoginDialogOutput::Cancelled => AppInput::AuthDeviceCancelled,
+                LoginDialogOutput::OpenInBrowser(url) => AppInput::OpenBrowser(url),
+                LoginDialogOutput::CopyCode(code) => AppInput::CopyToClipboard(code),
+            },
+        );
+        // Login dialog needs a parent for modality.
+        login.widget().set_transient_for(Some(&root));
+
         // ---- Layout ---------------------------------------------------
-        // Adw.ApplicationWindow content: ToolbarView with the header
-        // bar at the top, a horizontal Paned (sidebar | content) in the
-        // middle, and the mini player as a bottom bar.
         let toolbar = ToolbarView::new();
         toolbar.add_top_bar(header.widget());
 
-        let body = GtkBox::builder()
-            .orientation(Orientation::Vertical)
-            .build();
+        let body = GtkBox::builder().orientation(Orientation::Vertical).build();
 
         let paned = Paned::builder()
             .orientation(Orientation::Horizontal)
@@ -126,7 +146,7 @@ impl SimpleComponent for AppController {
         toolbar.set_content(Some(&body));
         root.set_content(Some(&toolbar));
 
-        // Track window size so settings can persist on close.
+        // Window resize → settings.
         let s = sender.clone();
         root.connect_default_width_notify(move |w| {
             let _ = s.input_sender().send(AppInput::WindowResized {
@@ -142,49 +162,58 @@ impl SimpleComponent for AppController {
             });
         });
 
+        // ---- Cold-start auth restore ----------------------------------
+        // If a token file exists, kick off load_token + check_login on a
+        // worker thread. We don't block init() because /v1/sessions can
+        // take ~hundreds of ms over a slow network and the GTK loop
+        // shouldn't wait.
+        kickoff_cold_start(session.clone(), sender.clone());
+
         let model = Self {
             model: init,
+            session,
+            poll_cancelled: Arc::new(AtomicBool::new(false)),
             header,
             sidebar,
             content,
             mini,
+            login,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             AppInput::NavigateTo(target) => {
                 self.model.current_nav = target;
                 self.model.settings.last_nav = target.as_id().into();
-                self.persist();
-                self.sidebar
-                    .sender()
-                    .send(SidebarInput::SetActive(target))
-                    .ok();
-                self.content
-                    .sender()
-                    .send(ContentStackInput::Show(target))
-                    .ok();
+                self.persist_settings();
+                self.sidebar.sender().send(SidebarInput::SetActive(target)).ok();
+                self.content.sender().send(ContentStackInput::Show(target)).ok();
             }
             AppInput::WindowResized { width, height } => {
                 if self.model.settings.remember_window_size {
                     self.model.settings.window_width = width;
                     self.model.settings.window_height = height;
-                    // Don't persist on every pixel of drag — settings save
-                    // happens on close (Phase 4 / on settings.save() call).
                 }
             }
             AppInput::ApplySettings(new) => {
                 self.model.settings = new;
-                self.persist();
+                self.persist_settings();
             }
             AppInput::Search(q) => {
                 tracing::info!(query = %q, "search submitted (Phase 7 will route this)");
             }
             AppInput::RequestLogin => {
-                tracing::info!("login requested (Phase 4 will open the auth flow)");
+                if self.model.auth.is_logged_in() {
+                    sender.input_sender().send(AppInput::LogoutRequested).ok();
+                } else {
+                    self.start_device_login(sender.clone());
+                }
+            }
+            AppInput::LogoutRequested => {
+                tracing::info!("logout requested (Phase 8 will clear token + reload UI)");
             }
             AppInput::OpenSettings => {
                 tracing::info!("settings dialog requested (Phase 8)");
@@ -201,22 +230,231 @@ impl SimpleComponent for AppController {
             AppInput::TransportSeek(p) => {
                 tracing::debug!(seek = p, "seek (Phase 4 wires the audio engine)");
             }
+
+            AppInput::AuthRestoreResult(profile) => {
+                self.apply_auth_result(profile);
+            }
+            AppInput::AuthDeviceStarted(info) => {
+                self.poll_cancelled.store(false, Ordering::SeqCst);
+                self.login.sender().send(LoginDialogInput::Show(info.clone())).ok();
+                self.schedule_device_poll(
+                    Duration::from_secs(info.interval.max(2) as u64),
+                    sender.clone(),
+                );
+            }
+            AppInput::AuthDeviceStartFailed(err) => {
+                tracing::warn!(error = %err, "device-code start failed");
+                self.model.auth.last_error = Some(err);
+                self.model.auth.status = AuthStatus::LoggedOut;
+            }
+            AppInput::AuthDevicePollTick(outcome) => match outcome {
+                AuthPollOutcome::StillPending => {
+                    // Loop continues; nothing to do.
+                }
+                AuthPollOutcome::LoggedIn(profile) => {
+                    self.poll_cancelled.store(true, Ordering::SeqCst);
+                    self.login.sender().send(LoginDialogInput::Hide).ok();
+                    if let Err(e) = self.session.save_persisted() {
+                        tracing::warn!(error = %e, "failed to persist token after login");
+                    }
+                    self.apply_auth_result(Some(profile));
+                }
+                AuthPollOutcome::Failed(err) => {
+                    self.poll_cancelled.store(true, Ordering::SeqCst);
+                    self.login
+                        .sender()
+                        .send(LoginDialogInput::SetStatus(format!("Failed: {err}")))
+                        .ok();
+                    tracing::warn!(error = %err, "device-code poll terminated");
+                }
+            },
+            AppInput::AuthDeviceCancelled => {
+                self.poll_cancelled.store(true, Ordering::SeqCst);
+                self.login.sender().send(LoginDialogInput::Hide).ok();
+            }
+            AppInput::OpenBrowser(url) => {
+                if let Err(e) = open_in_browser(&url) {
+                    tracing::warn!(error = %e, %url, "xdg-open failed");
+                }
+            }
+            AppInput::CopyToClipboard(text) => {
+                copy_to_clipboard(&text);
+            }
         }
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: ComponentSender<Self>) {
-        // Touch the window field so the borrow checker keeps it live;
-        // future view sync (e.g. window-title binding to current track)
-        // wires here.
         let _ = &widgets.window;
+        let display = self
+            .model
+            .auth
+            .profile
+            .as_ref()
+            .map(|p| p.display_name().to_string());
+        self.header
+            .sender()
+            .send(HeaderInput::SetUserDisplay(display))
+            .ok();
     }
 }
 
 impl AppController {
-    fn persist(&self) {
+    fn persist_settings(&self) {
         if let Err(e) = self.model.settings.save() {
             tracing::warn!(error = %e, "settings save failed");
         }
+    }
+
+    fn apply_auth_result(&mut self, profile: Option<UserProfile>) {
+        match profile {
+            Some(p) => {
+                self.model.auth.profile = Some(p);
+                self.model.auth.status = AuthStatus::LoggedIn;
+                self.model.auth.last_error = None;
+                tracing::info!(
+                    user_id = self.model.auth.profile.as_ref().map(|p| p.user_id),
+                    "logged in"
+                );
+            }
+            None => {
+                self.model.auth.profile = None;
+                self.model.auth.status = AuthStatus::LoggedOut;
+            }
+        }
+    }
+
+    fn start_device_login(&mut self, sender: ComponentSender<Self>) {
+        self.model.auth.status = AuthStatus::Authenticating;
+        self.model.auth.last_error = None;
+        let svc = self.session.clone();
+        let sender_in = sender.input_sender().clone();
+        spawn_blocking(
+            move || svc.oauth_device_start_blocking(),
+            move |result| match result {
+                Ok(info) => {
+                    let _ = sender_in.send(AppInput::AuthDeviceStarted(info));
+                }
+                Err(e) => {
+                    let _ = sender_in.send(AppInput::AuthDeviceStartFailed(e.to_string()));
+                }
+            },
+        );
+    }
+
+    fn schedule_device_poll(&self, interval: Duration, sender: ComponentSender<Self>) {
+        let svc = self.session.clone();
+        let cancel = Arc::clone(&self.poll_cancelled);
+        let secs = interval.as_secs().max(2);
+        // glib timeout runs on the main thread; each tick fires off a
+        // worker thread for the blocking poll call so the UI stays
+        // responsive even if the network hiccups.
+        glib::timeout_add_seconds_local(secs as u32, move || {
+            if cancel.load(Ordering::SeqCst) {
+                return glib::ControlFlow::Break;
+            }
+            // Two clones: one captured by the closure that runs
+            // oauth_device_poll, the other captured by the result
+            // callback which fetches the user profile on success.
+            let svc_for_poll = svc.clone();
+            let svc_for_cb = svc.clone();
+            let sender_in = sender.input_sender().clone();
+            let cancel_inner = Arc::clone(&cancel);
+            spawn_blocking(
+                move || svc_for_poll.oauth_device_poll_blocking(),
+                move |result| {
+                    if cancel_inner.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let outcome = match result {
+                        Ok(None) => AuthPollOutcome::StillPending,
+                        Ok(Some(info)) => {
+                            // Best-effort: enrich the UserProfile with
+                            // /users/{id} fields. Failure is non-fatal —
+                            // we still log in with the bare info.
+                            let mut profile = UserProfile::from_user_info(&info);
+                            if let Ok(json) = svc_for_cb.fetch_profile_blocking(info.user_id)
+                            {
+                                fill_profile_from_json(&mut profile, &json);
+                            }
+                            AuthPollOutcome::LoggedIn(profile)
+                        }
+                        Err(e) => AuthPollOutcome::Failed(e.to_string()),
+                    };
+                    let _ = sender_in.send(AppInput::AuthDevicePollTick(outcome));
+                },
+            );
+            glib::ControlFlow::Continue
+        });
+    }
+}
+
+fn kickoff_cold_start(svc: TidalSessionService, sender: ComponentSender<AppController>) {
+    let svc_for_save = svc.clone();
+    spawn_blocking(
+        move || -> Option<UserProfile> {
+            let token = match TidalSessionService::load_persisted() {
+                Ok(Some(t)) => t,
+                Ok(None) => return None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "token load failed");
+                    return None;
+                }
+            };
+            let info = match svc.load_token_with_refresh_blocking(token) {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::info!(error = %e, "saved token rejected; staying logged out");
+                    return None;
+                }
+            };
+            // If refresh ran above, persist the new token immediately
+            // so the next launch can skip /v1/sessions on the stale one.
+            if let Err(e) = svc_for_save.save_persisted() {
+                tracing::debug!(error = %e, "save after restore skipped");
+            }
+            if !svc.check_login_blocking() {
+                tracing::info!("check_login returned false; staying logged out");
+                return None;
+            }
+            let mut profile = UserProfile::from_user_info(&info);
+            if let Ok(json) = svc.fetch_profile_blocking(info.user_id) {
+                fill_profile_from_json(&mut profile, &json);
+            }
+            Some(profile)
+        },
+        move |profile| {
+            let _ = sender.input_sender().send(AppInput::AuthRestoreResult(profile));
+        },
+    );
+}
+
+fn fill_profile_from_json(p: &mut UserProfile, json: &serde_json::Value) {
+    if let Some(s) = json.get("firstName").and_then(|v| v.as_str()) {
+        p.first_name = s.to_owned();
+    }
+    if let Some(s) = json.get("lastName").and_then(|v| v.as_str()) {
+        p.last_name = s.to_owned();
+    }
+    if let Some(s) = json.get("username").and_then(|v| v.as_str()) {
+        p.username = s.to_owned();
+    }
+    if let Some(s) = json.get("email").and_then(|v| v.as_str()) {
+        p.email = s.to_owned();
+    }
+    // displayName / nickName is owned by the profileMetadata endpoint;
+    // not fetched here yet (matches Python behavior of best-effort).
+}
+
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open").arg(url).spawn()?;
+    Ok(())
+}
+
+fn copy_to_clipboard(text: &str) {
+    if let Some(display) = relm4::gtk::gdk::Display::default() {
+        display.clipboard().set_text(text);
+    } else {
+        tracing::debug!("no GDK display, can't copy to clipboard");
     }
 }
 
