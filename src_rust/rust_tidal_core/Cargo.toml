@@ -7,13 +7,6 @@ edition = "2021"
 name = "rust_tidal_core"
 crate-type = ["cdylib", "rlib"]
 
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-debug-assertions = false
-overflow-checks = false
-
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

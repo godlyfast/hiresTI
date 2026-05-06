@@ -1,0 +1,24 @@
+[package]
+name = "hiresti_ui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+# Phase 1: keep distinct from `rust_launcher`'s `hiresti` binary so both
+# coexist during the rewrite. Phase 11 cuts over: `rust_launcher` is
+# retired and this binary is renamed to `hiresti`.
+name = "hiresti_ui"
+path = "src/main.rs"
+
+[dependencies]
+gtk4.workspace = true
+libadwaita.workspace = true
+relm4.workspace = true
+glib.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

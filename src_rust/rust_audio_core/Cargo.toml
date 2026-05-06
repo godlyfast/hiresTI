@@ -17,13 +17,6 @@ name = "play_test"
 path = "src/bin/play_test.rs"
 required-features = []
 
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-debug-assertions = false
-overflow-checks = false
-
 [build-dependencies]
 pkg-config = "0.3"
 cc = "1"
