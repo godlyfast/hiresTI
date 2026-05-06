@@ -65,6 +65,7 @@ use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
 use crate::services::mpris::{self, MprisHandle, MprisMetadata, MprisTransport};
+use crate::services::scrobbler::{ScrobbleTrack, ScrobblerConfig, ScrobblerService};
 use crate::services::tidal_session::{spawn_blocking, ResolvedPlayback, TidalSessionService};
 use crate::services::tray::{self, TrayHandle};
 use crate::state::playback::TransportState;
@@ -154,6 +155,12 @@ pub struct AppController {
     /// MPRIS2 D-Bus service. None when zbus session init failed.
     /// `Drop` queues a Shutdown command and joins the worker thread.
     mpris: Option<MprisHandle>,
+
+    /// Scrobbler. Cheap to clone — internally wraps an
+    /// `Arc<Mutex<State>>` and dispatches HTTP submissions to
+    /// detached worker threads. Configured from `settings.extra` on
+    /// init + every ApplySettings.
+    scrobbler: ScrobblerService,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -485,6 +492,10 @@ impl SimpleComponent for AppController {
             }
         };
 
+        // ---- Scrobbler ------------------------------------------------
+        let scrobbler = ScrobblerService::new();
+        scrobbler.configure(scrobbler_config_from(&init.settings));
+
         // Window close → hide-to-tray when tray is up; otherwise
         // standard quit behavior. The user can always exit via
         // tray "Quit" or by re-running and quitting properly.
@@ -540,6 +551,7 @@ impl SimpleComponent for AppController {
             window_for_dialogs: root.clone(),
             tray,
             mpris,
+            scrobbler,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -575,6 +587,11 @@ impl SimpleComponent for AppController {
                         != settings_str(&new, "device");
                 self.model.settings = new;
                 self.persist_settings();
+                // Push the new scrobbler tokens / enable flags down to
+                // the service so the next track resolves under the
+                // updated config.
+                self.scrobbler
+                    .configure(scrobbler_config_from(&self.model.settings));
                 // Live-apply driver/device deltas to the engine so the
                 // user doesn't have to restart for output changes.
                 // Other audio settings (latency, mmap rt, exclusive)
@@ -608,6 +625,7 @@ impl SimpleComponent for AppController {
                 }
                 self.model.playback = Default::default();
                 self.model.queue = Default::default();
+                self.scrobbler.on_track_stopped();
                 if let Some(m) = self.mpris.as_ref() {
                     m.stop();
                     m.set_metadata(MprisMetadata::default());
@@ -1203,6 +1221,9 @@ impl AppController {
             // SetPosition / Seek calls.
             m.set_position(pos, false);
         }
+        // Scrobble check on the same 1s cadence — the service guards
+        // against double-submit + missing config internally.
+        self.scrobbler.tick(pos, dur);
     }
 
     fn start_play_track(&mut self, track_id: i64, sender: ComponentSender<Self>) {
@@ -1323,6 +1344,20 @@ impl AppController {
         if let Some(m) = self.mpris.as_ref() {
             m.set_metadata(self.build_mpris_metadata(None));
         }
+        // Tell the scrobbler about the new track. It records the
+        // start timestamp + fires a "now playing" notification on a
+        // worker thread; the actual scrobble submission waits until
+        // the playback tick crosses the spec'd threshold.
+        self.scrobbler.on_track_started(ScrobbleTrack {
+            title: title.clone(),
+            artist: artist.clone(),
+            album: track
+                .album
+                .as_ref()
+                .map(|a| a.name.clone())
+                .unwrap_or_default(),
+            duration: track.duration.max(0) as u32,
+        });
 
         // Hand the URL to rust_audio_core. The resolver already falls
         // back to the legacy URL endpoint for MPD manifests so we
@@ -1568,6 +1603,19 @@ fn settings_str(s: &Settings, key: &str) -> Option<String> {
         .get(key)
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+fn settings_bool(s: &Settings, key: &str) -> bool {
+    s.extra.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn scrobbler_config_from(s: &Settings) -> ScrobblerConfig {
+    ScrobblerConfig {
+        lastfm_enabled: settings_bool(s, "scrobble_lastfm_enabled"),
+        lastfm_session_key: settings_str(s, "scrobble_lastfm_session_key").unwrap_or_default(),
+        listenbrainz_enabled: settings_bool(s, "scrobble_listenbrainz_enabled"),
+        listenbrainz_token: settings_str(s, "scrobble_listenbrainz_token").unwrap_or_default(),
+    }
 }
 
 fn make_lib_forward() -> impl Fn(LibraryViewOutput) -> AppInput + 'static + Copy {

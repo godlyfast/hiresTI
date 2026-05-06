@@ -45,3 +45,7 @@ mpris-server = "0.10"
 async-io = "2"
 async-channel = "2"
 futures-lite = "2"
+
+# Scrobbler — Last.fm signing requires MD5; ListenBrainz is JSON-only
+# but uses serde_json (already in workspace deps).
+md-5 = "0.10"
