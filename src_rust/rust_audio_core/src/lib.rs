@@ -16,6 +16,11 @@ pub mod usb_audio;
 use alsa_pcm::{AlsaCtx, AlsaHandle};
 use dsp::{DspGraphConfig, LufsValues, PEQ_BAND_COUNT, SPECTRUM_ACTIVE_BANDS_DEFAULT};
 
+// Re-export the LUFS readings struct so UI consumers can name the
+// return type of `Engine::lufs_values()` without poking into the
+// (private) `dsp` module.
+pub use dsp::LufsValues as EngineLufsValues;
+
 const SPECTRUM_BANDS_MAX: usize = 4096;
 const SPECTRUM_RING_CAP: usize = 512;
 
@@ -1523,6 +1528,14 @@ impl Engine {
             out[..n].copy_from_slice(&self.spectrum_vals[..n]);
         }
         n
+    }
+
+    /// Latest K-weighted LUFS readings + 4s dynamic range from the
+    /// DSP meter. Mirrors `rac_get_lufs` minus the FFI plumbing.
+    /// Unavailable values come back as `f32::NEG_INFINITY` (LUFS) or
+    /// `0.0` (LRA / DR).
+    pub fn lufs_values(&self) -> EngineLufsValues {
+        self.native_transport.lufs_values()
     }
 }
 

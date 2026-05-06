@@ -9,6 +9,7 @@
 pub mod about_dialog;
 pub mod content_stack;
 pub mod diagnostics_dialog;
+pub mod dr_meter;
 pub mod dsp_preset_dialog;
 pub mod header;
 pub mod login_dialog;

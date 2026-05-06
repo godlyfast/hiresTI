@@ -27,6 +27,7 @@ use relm4::{
 
 use crate::components::about_dialog;
 use crate::components::diagnostics_dialog::{self, EngineSnapshot};
+use crate::components::dr_meter::{DrMeterInput, DrMeterModel};
 use crate::components::dsp_preset_dialog;
 use crate::components::settings_dialog;
 use crate::components::signal_path_window;
@@ -95,6 +96,9 @@ pub struct AppController {
     /// Whether the bars are currently in "active" coloring (transport
     /// is playing). Tracked so we only send `SetActive` on transitions.
     viz_active: bool,
+    /// LUFS / dynamic-range readout strip. Polled on the same VizTick
+    /// the bars use, so both stay in sync.
+    dr_meter: Controller<DrMeterModel>,
     login: Controller<LoginDialogModel>,
     pkce_login: Controller<PkceLoginDialogModel>,
 
@@ -331,6 +335,7 @@ impl SimpleComponent for AppController {
         );
 
         let viz = BarsVisualizerModel::builder().launch(()).detach();
+        let dr_meter = DrMeterModel::builder().launch(()).detach();
 
         let login = LoginDialogModel::builder().launch(()).forward(
             sender.input_sender(),
@@ -371,6 +376,7 @@ impl SimpleComponent for AppController {
 
         body.append(&Separator::new(Orientation::Horizontal));
         body.append(viz.widget());
+        body.append(dr_meter.widget());
         body.append(mini.widget());
 
         toolbar.set_content(Some(&body));
@@ -495,6 +501,7 @@ impl SimpleComponent for AppController {
             viz,
             viz_last_seq: 0,
             viz_active: false,
+            dr_meter,
             login,
             pkce_login,
             albums_view,
@@ -906,6 +913,9 @@ impl SimpleComponent for AppController {
                         .sender()
                         .send(BarsVisualizerInput::SetActive(is_playing))
                         .ok();
+                    if !is_playing {
+                        self.dr_meter.sender().send(DrMeterInput::Reset).ok();
+                    }
                 }
                 if let Some(engine) = self.engine.as_ref() {
                     let seq = engine.spectrum_seq();
@@ -918,6 +928,10 @@ impl SimpleComponent for AppController {
                             .sender()
                             .send(BarsVisualizerInput::SetFrame { seq, values: buf })
                             .ok();
+                    }
+                    if is_playing {
+                        let lufs = engine.lufs_values();
+                        self.dr_meter.sender().send(DrMeterInput::Set(lufs)).ok();
                     }
                 }
                 self.viz.sender().send(BarsVisualizerInput::Tick).ok();
