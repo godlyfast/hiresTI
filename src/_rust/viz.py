@@ -78,6 +78,21 @@ class RustVizCore:
         except Exception:
             logger.info("Rust viz core lacks build_log_bins symbol; using Python fallback for log bins.")
 
+        self._viz_resample = None
+        try:
+            resample = self._lib.viz_resample
+            resample.argtypes = [
+                ctypes.POINTER(ctypes.c_float),  # input ptr
+                ctypes.c_size_t,                 # input len
+                ctypes.POINTER(ctypes.c_float),  # output ptr
+                ctypes.c_size_t,                 # output len
+                ctypes.c_uint32,                 # mode (0=mean, 1=peak)
+            ]
+            resample.restype = ctypes.c_size_t
+            self._viz_resample = resample
+        except Exception:
+            logger.info("Rust viz core lacks viz_resample symbol; using Python fallback for bucket resample.")
+
         self._compute_level_metrics = None
         try:
             level_metrics = self._lib.compute_level_metrics
@@ -831,6 +846,32 @@ class RustVizCore:
         if len(out) < out_n:
             out.extend([0.0] * (out_n - len(out)))
         return out
+
+    def resample(
+        self,
+        values: Iterable[float],
+        out_count: int,
+        use_peak: bool = False,
+    ) -> Optional[List[float]]:
+        """Bucket-resample `values` to `out_count` slots. `use_peak=False`
+        averages each bucket; `use_peak=True` returns the bucket maximum.
+        Returns None when the Rust symbol isn't loaded so callers can
+        fall back to the Python implementation."""
+        if self._lib is None or self._viz_resample is None:
+            return None
+        out_n = int(out_count)
+        if out_n <= 0:
+            return []
+        vals = [float(v) for v in values]
+        if not vals:
+            return [0.0] * out_n
+        in_len = len(vals)
+        in_buf = (ctypes.c_float * in_len)(*vals)
+        out_buf = (ctypes.c_float * out_n)()
+        written = int(self._viz_resample(in_buf, in_len, out_buf, out_n, 1 if use_peak else 0))
+        if written <= 0:
+            return None
+        return [float(out_buf[i]) for i in range(min(written, out_n))]
 
     def compute_level_metrics(
         self,

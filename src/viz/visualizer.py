@@ -1402,6 +1402,11 @@ class SpectrumVisualizer(Gtk.DrawingArea):
             )
 
     def _resample_channel_heights(self, values, out_count):
+        # Note: Rust `viz_resample` exists in rust_viz_core but the
+        # ctypes marshaling cost (per-call buffer alloc + list→array
+        # copy) eats the native speedup at the array sizes we hit
+        # here (~96 elements). Stay in Python until we can hand Rust
+        # a pre-allocated, reused ctypes buffer.
         vals = list(values or [])
         if out_count <= 0:
             return []
@@ -2599,24 +2604,74 @@ class SpectrumVisualizer(Gtk.DrawingArea):
         n = self.num_bars
         if n <= 0:
             return
-        # Keep Dots on classic Cairo path: lower CPU than full-frame image synthesis.
-        dot_h = 4.0
-        gap = 3.0
+        dot_h = 4
+        gap = 3
+
+        # Rust fast path: build the full dot grid as an RGBA bitmap and
+        # paint with a single set_source_surface(). One C call beats
+        # n × ⌈h/(dot+gap)⌉ Cairo rectangle fills.
+        if self._rust_core.available:
+            bar_colors = [
+                self._color_from_gradient(grad, i / float(max(1, n - 1)))
+                for i in range(n)
+            ]
+            rgba_pack = self._rust_core.build_dots_rgba(
+                levels=self.current_heights,
+                gain=float(gain),
+                canvas_width_px=int(max(1, width)),
+                height_px=int(max(1, height)),
+                bar_w_px=max(1, int(round(bar_w))),
+                spacing_px=max(0, int(round(spacing))),
+                dot_h_px=dot_h,
+                gap_y_px=gap,
+                bar_colors_rgba=bar_colors,
+            )
+            if rgba_pack is not None:
+                if not self._logged_rust_dots_img:
+                    logger.info("Dots image-generation path: Rust")
+                    self._logged_rust_dots_img = True
+                rgba_bytes, img_w, img_h = rgba_pack
+                stride = img_w * 4
+                try:
+                    surf = cairo.ImageSurface.create_for_data(
+                        rgba_bytes,
+                        cairo.FORMAT_ARGB32,
+                        img_w,
+                        img_h,
+                        stride,
+                    )
+                    cr.set_source_surface(surf, 0.0, 0.0)
+                    src = cr.get_source()
+                    try:
+                        src.set_filter(cairo.FILTER_NEAREST)
+                    except Exception:
+                        pass
+                    cr.paint()
+                    return
+                except Exception:
+                    pass
+
+        if not self._logged_python_dots_img:
+            logger.info("Dots image-generation path: Python fallback")
+            self._logged_python_dots_img = True
+
+        dot_h_f = float(dot_h)
+        gap_f = float(gap)
         for i in range(self.num_bars):
             h_ratio = self.current_heights[i]
             if h_ratio < 0.001:
                 continue
             h = max(1.0, min(h_ratio * height * gain, height))
             x = i * (bar_w + spacing)
-            y = height - dot_h
+            y = height - dot_h_f
             t = i / float(max(1, self.num_bars - 1))
             r, g, b, a = self._color_from_gradient(grad, t)
             cr.set_source_rgba(r, g, b, a)
             drawn = 0.0
             while drawn < h:
-                cr.rectangle(x, y - drawn, bar_w, dot_h)
+                cr.rectangle(x, y - drawn, bar_w, dot_h_f)
                 cr.fill()
-                drawn += dot_h + gap
+                drawn += dot_h_f + gap_f
 
     def _draw_radial(self, cr, width, height, gain, theme):
         cx, cy = width * 0.5, height * 0.52

@@ -1266,6 +1266,72 @@ pub extern "C" fn viz_state_stereo_tick_copy(
     n
 }
 
+/// Bucket-resample `input` into `output_len` slots. Each output slot
+/// `i` covers the input range `[i/out * in, (i+1)/out * in)` and
+/// reduces it to either the bucket's mean (`mode = 0`) or peak
+/// (`mode = 1`). Mirrors the Python `_resample_linear_values` and
+/// `_resample_channel_heights` helpers — the per-frame cost of those
+/// loops in spectrum + stereo visualizers was dominated by the inner
+/// Python aggregation, not the FFI round-trip.
+#[no_mangle]
+pub extern "C" fn viz_resample(
+    input_ptr: *const f32,
+    input_len: usize,
+    output_ptr: *mut f32,
+    output_len: usize,
+    mode: u32,
+) -> usize {
+    if input_ptr.is_null() || output_ptr.is_null() || output_len == 0 {
+        return 0;
+    }
+    let out = unsafe { slice::from_raw_parts_mut(output_ptr, output_len) };
+    if input_len == 0 {
+        for slot in out.iter_mut() {
+            *slot = 0.0;
+        }
+        return output_len;
+    }
+    let input = unsafe { slice::from_raw_parts(input_ptr, input_len) };
+    let in_count = input_len;
+    let out_count = output_len;
+    let inv_out = 1.0_f32 / (out_count as f32);
+    let in_f = in_count as f32;
+    let use_peak = mode == 1;
+    for i in 0..out_count {
+        let t0 = (i as f32) * inv_out;
+        let t1 = ((i + 1) as f32) * inv_out;
+        let mut x0 = (t0 * in_f) as usize;
+        let mut x1 = (t1 * in_f) as usize;
+        if x0 >= in_count {
+            x0 = in_count - 1;
+        }
+        if x1 <= x0 {
+            x1 = (x0 + 1).min(in_count);
+        } else if x1 > in_count {
+            x1 = in_count;
+        }
+        if use_peak {
+            let mut peak = 0.0_f32;
+            for v in &input[x0..x1] {
+                if *v > peak {
+                    peak = *v;
+                }
+            }
+            out[i] = peak;
+        } else {
+            let slice = &input[x0..x1];
+            let n = slice.len() as f32;
+            if n > 0.0 {
+                let sum: f32 = slice.iter().sum();
+                out[i] = sum / n;
+            } else {
+                out[i] = 0.0;
+            }
+        }
+    }
+    out_count
+}
+
 #[no_mangle]
 pub extern "C" fn process_spectrum(
     input_ptr: *const f32,
