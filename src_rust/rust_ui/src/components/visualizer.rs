@@ -1,14 +1,15 @@
-//! Spectrum bars visualizer. A thin GtkDrawingArea that renders the
-//! current `viz_core::VizStateEngine` bars + peak holds. The state is
-//! driven externally — AppController polls `Engine::copy_spectrum_mono`
-//! on a 33ms tick and feeds frames in via `BarsVisualizerInput::SetFrame`.
-//! Each tick advances the EMA + queues a redraw, so the bars stay
-//! animated even between fresh audio frames (state machine "settles"
-//! during silence).
+//! Spectrum visualizer. A thin GtkDrawingArea that renders the
+//! current `viz_core::VizStateEngine` smoothed bars in one of several
+//! modes (bars / line / spiral). State is driven externally —
+//! AppController polls `Engine::copy_spectrum_mono` on a 33ms tick
+//! and feeds frames in via `BarsVisualizerInput::SetFrame`. Each
+//! tick advances the EMA + spiral phase + queues a redraw, so the
+//! visualization stays animated even between fresh audio frames
+//! (state machine "settles" during silence).
 //!
 //! The draw closure can't borrow component state, so the model
-//! mirrors the smoothed bar heights into an `Rc<RefCell<PaintData>>`
-//! the draw closure clones at attach time.
+//! mirrors the smoothed values into an `Rc<RefCell<PaintData>>` the
+//! draw closure clones at attach time.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,7 +18,33 @@ use relm4::gtk::cairo::Context as CairoContext;
 use relm4::gtk::{prelude::*, DrawingArea};
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
-use viz_core::{map_log_spectrum, VizStateEngine};
+use viz_core::{
+    build_line_points_rs, build_spiral_points_rs, map_log_spectrum, VizStateEngine,
+};
+
+/// Render mode. Mirrors the `viz_mode` setting in `settings.extra`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VizMode {
+    Bars,
+    Line,
+    Spiral,
+}
+
+impl VizMode {
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "line" => Self::Line,
+            "spiral" => Self::Spiral,
+            _ => Self::Bars,
+        }
+    }
+}
+
+impl Default for VizMode {
+    fn default() -> Self {
+        Self::Bars
+    }
+}
 
 /// Number of rendered bars. 64 is a sweet spot — fine enough to look
 /// dense, coarse enough to read at small heights (mini-player strip).
@@ -38,6 +65,9 @@ struct ColorRgba {
 struct PaintData {
     bars: Vec<f32>,
     peaks: Vec<f32>,
+    /// Phase accumulator for the spiral mode. Bumped each Tick.
+    phase: f32,
+    mode: VizMode,
     /// Disabled state renders a flat gradient placeholder so the
     /// strip doesn't suddenly disappear when the engine isn't pushing
     /// frames.
@@ -52,6 +82,8 @@ pub struct BarsVisualizerModel {
     bar_input: Vec<f32>,
     paint: Rc<RefCell<PaintData>>,
     active: bool,
+    mode: VizMode,
+    phase: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +98,9 @@ pub enum BarsVisualizerInput {
     /// Suspend / resume rendering. Disabled state idles + draws a
     /// flat baseline.
     SetActive(bool),
+    /// Switch to a different render mode. Cheap — just updates the
+    /// PaintData mode tag; the next redraw picks the new path.
+    SetMode(VizMode),
 }
 
 impl SimpleComponent for BarsVisualizerModel {
@@ -91,6 +126,8 @@ impl SimpleComponent for BarsVisualizerModel {
         let paint: Rc<RefCell<PaintData>> = Rc::new(RefCell::new(PaintData {
             bars: vec![0.0; BAR_COUNT],
             peaks: vec![0.0; BAR_COUNT],
+            phase: 0.0,
+            mode: VizMode::Bars,
             active: false,
         }));
         let paint_for_draw = Rc::clone(&paint);
@@ -105,6 +142,8 @@ impl SimpleComponent for BarsVisualizerModel {
             bar_input: vec![0.0; BAR_COUNT],
             paint,
             active: false,
+            mode: VizMode::Bars,
+            phase: 0.0,
         };
         ComponentParts { model, widgets }
     }
@@ -121,12 +160,22 @@ impl SimpleComponent for BarsVisualizerModel {
             }
             BarsVisualizerInput::Tick => {
                 self.state.tick();
+                // Phase advances at ~30Hz; 0.04 rad/tick gives a
+                // ~1.2 Hz spiral rotation rate, which reads as
+                // "subtly drifting" without being dizzying.
+                self.phase += 0.04;
+                if self.phase > std::f32::consts::TAU * 32.0 {
+                    self.phase -= std::f32::consts::TAU * 32.0;
+                }
             }
             BarsVisualizerInput::SetActive(active) => {
                 self.active = active;
                 if !active {
                     self.state.reset();
                 }
+            }
+            BarsVisualizerInput::SetMode(m) => {
+                self.mode = m;
             }
         }
     }
@@ -138,6 +187,8 @@ impl SimpleComponent for BarsVisualizerModel {
         {
             let mut p = self.paint.borrow_mut();
             p.active = self.active;
+            p.mode = self.mode;
+            p.phase = self.phase;
             let cur = self.state.current();
             let peak = self.state.peak();
             for i in 0..BAR_COUNT {
@@ -156,11 +207,18 @@ fn draw(cr: &CairoContext, w: i32, h: i32, paint: &PaintData) {
     cr.rectangle(0.0, 0.0, width, height);
     let _ = cr.fill();
 
-    let n = paint.bars.len();
-    if n == 0 {
+    if paint.bars.is_empty() {
         return;
     }
+    match paint.mode {
+        VizMode::Bars => draw_bars(cr, width, height, paint),
+        VizMode::Line => draw_line(cr, width, height, paint),
+        VizMode::Spiral => draw_spiral(cr, width, height, paint),
+    }
+}
 
+fn draw_bars(cr: &CairoContext, width: f64, height: f64, paint: &PaintData) {
+    let n = paint.bars.len();
     let gap_px: f64 = 2.0;
     let total_gap = gap_px * (n.saturating_sub(1)) as f64;
     let bar_w = ((width - total_gap) / n as f64).max(1.0);
@@ -184,6 +242,57 @@ fn draw(cr: &CairoContext, w: i32, h: i32, paint: &PaintData) {
             cr.rectangle(x, py, bar_w, 2.0);
             let _ = cr.fill();
         }
+    }
+}
+
+fn draw_line(cr: &CairoContext, width: f64, height: f64, paint: &PaintData) {
+    let pts = build_line_points_rs(&paint.bars, width as f32, height as f32, 1.0);
+    if pts.len() < 2 {
+        return;
+    }
+    let alpha = if paint.active { 0.95 } else { 0.45 };
+    cr.set_line_width(2.4);
+    cr.set_source_rgba(0.40, 0.85, 1.0, alpha);
+    cr.move_to(pts[0].0 as f64, pts[0].1 as f64);
+    for &(x, y) in pts.iter().skip(1) {
+        cr.line_to(x as f64, y as f64);
+    }
+    let _ = cr.stroke();
+
+    // Subtle fill underneath the curve so the strip reads as
+    // amplitude-over-frequency rather than just a wiggly line.
+    cr.move_to(pts[0].0 as f64, height);
+    for &(x, y) in pts.iter() {
+        cr.line_to(x as f64, y as f64);
+    }
+    cr.line_to(pts[pts.len() - 1].0 as f64, height);
+    cr.close_path();
+    cr.set_source_rgba(0.40, 0.85, 1.0, alpha * 0.18);
+    let _ = cr.fill();
+}
+
+fn draw_spiral(cr: &CairoContext, width: f64, height: f64, paint: &PaintData) {
+    let pts = build_spiral_points_rs(
+        &paint.bars,
+        width as f32,
+        height as f32,
+        paint.phase,
+        1.0,
+    );
+    if pts.is_empty() {
+        return;
+    }
+    let alpha_floor = if paint.active { 0.30 } else { 0.10 };
+    for (x, y, lvl, t) in pts {
+        let val = lvl as f64;
+        let r = 0.40 + 0.55 * t as f64;
+        let g = 0.20 + 0.55 * (1.0 - t as f64) + 0.20 * val;
+        let b = 0.95 - 0.50 * t as f64 + 0.05 * val;
+        let a = alpha_floor + 0.65 * val;
+        let dot_r = (1.4 + 3.6 * val).max(0.6);
+        cr.set_source_rgba(r, g, b, a);
+        cr.arc(x as f64, y as f64, dot_r, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
     }
 }
 

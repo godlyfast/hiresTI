@@ -602,6 +602,75 @@ pub fn map_log_spectrum(input: &[f32], out: &mut [f32], db_min: f32, db_range: f
     map_log_spectrum_impl(input, out, db_min, db_range);
 }
 
+/// Polyline points for the "line" visualizer mode. Returns `(x, y)`
+/// tuples plotted across `[0, width] × [0, height]`. The bottom of the
+/// canvas (y = height) is silence; bars rising up to the top are 1.0.
+/// Pure-Rust safe wrapper over `build_line_points`.
+pub fn build_line_points_rs(
+    bins: &[f32],
+    width: f32,
+    height: f32,
+    gain: f32,
+) -> Vec<(f32, f32)> {
+    if bins.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = vec![0.0f32; bins.len() * 2];
+    let n = build_line_points(
+        bins.as_ptr(),
+        bins.len(),
+        width,
+        height,
+        gain,
+        out.as_mut_ptr(),
+        out.len(),
+    );
+    let pts = n / 2;
+    out.truncate(n);
+    let mut points = Vec::with_capacity(pts);
+    for chunk in out.chunks_exact(2) {
+        points.push((chunk[0], chunk[1]));
+    }
+    points
+}
+
+/// Spiral-mode points. Each entry is `(x, y, level, t)` where `level`
+/// is the [0, 1] amplitude at that sample and `t` is the [0, 1]
+/// position along the spiral (low → high frequency). Phase advances
+/// over time; pass an accumulator that increments by ~0.04 per
+/// 33ms tick.
+pub fn build_spiral_points_rs(
+    bins: &[f32],
+    width: f32,
+    height: f32,
+    phase: f32,
+    gain: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    if bins.is_empty() {
+        return Vec::new();
+    }
+    // The FFI walks 240 sample slots; 4 floats per point plus a small
+    // headroom gives us a safe upper bound that the kernel's `cap`
+    // check will tighten for us.
+    let mut out = vec![0.0f32; 240 * 4];
+    let n = build_spiral_points(
+        bins.as_ptr(),
+        bins.len(),
+        width,
+        height,
+        phase,
+        gain,
+        out.as_mut_ptr(),
+        out.len(),
+    );
+    out.truncate(n);
+    let mut points = Vec::with_capacity(n / 4);
+    for chunk in out.chunks_exact(4) {
+        points.push((chunk[0], chunk[1], chunk[2], chunk[3]));
+    }
+    points
+}
+
 /// Linear-frequency variant of `map_log_spectrum`. Bars are evenly
 /// spaced on the [0, half-rate] axis instead of log-distributed.
 /// `half_rate_hz` is typically 24000 (sample rate / 2) for 48kHz

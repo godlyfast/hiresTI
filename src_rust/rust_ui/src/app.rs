@@ -45,7 +45,7 @@ use crate::components::pkce_login_dialog::{
 };
 use crate::components::mini_player::{MiniPlayerInput, MiniPlayerModel, MiniPlayerOutput};
 use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
-use crate::components::visualizer::{BarsVisualizerInput, BarsVisualizerModel};
+use crate::components::visualizer::{BarsVisualizerInput, BarsVisualizerModel, VizMode};
 use crate::components::views::album_detail::{AlbumDetailInit, AlbumDetailViewModel};
 use crate::components::views::albums::{AlbumsViewInput, AlbumsViewModel};
 use crate::components::views::artist_detail::{ArtistDetailInit, ArtistDetailViewModel};
@@ -377,6 +377,17 @@ impl SimpleComponent for AppController {
         );
 
         let viz = BarsVisualizerModel::builder().launch(()).detach();
+        // Push the persisted render mode before the first SetFrame so
+        // the user lands in the mode they had last session instead of
+        // the bars default.
+        let initial_viz_mode = VizMode::from_id(
+            settings_str(&init.settings, "viz_mode")
+                .as_deref()
+                .unwrap_or(""),
+        );
+        viz.sender()
+            .send(BarsVisualizerInput::SetMode(initial_viz_mode))
+            .ok();
         let dr_meter = DrMeterModel::builder().launch(()).detach();
         let lyric_strip = LyricStripModel::builder().launch(()).detach();
 
@@ -664,6 +675,18 @@ impl SimpleComponent for AppController {
                 // updated config.
                 self.scrobbler
                     .configure(scrobbler_config_from(&self.model.settings));
+                // Live-apply the visualizer mode. Cheap — the
+                // component just flips the PaintData mode tag and
+                // the next 33ms tick redraws.
+                let mode = VizMode::from_id(
+                    settings_str(&self.model.settings, "viz_mode")
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                self.viz
+                    .sender()
+                    .send(BarsVisualizerInput::SetMode(mode))
+                    .ok();
                 // Restart the remote-API server if the on/port/token
                 // shape changed. Cheap when off — the helper short-
                 // circuits when remote_api_enabled is false.
