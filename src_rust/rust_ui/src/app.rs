@@ -2018,7 +2018,18 @@ fn fill_profile_from_json(p: &mut UserProfile, json: &serde_json::Value) {
 }
 
 fn open_in_browser(url: &str) -> std::io::Result<()> {
-    std::process::Command::new("xdg-open").arg(url).spawn()?;
+    // Defensive: xdg-open / gio resolve schemeless inputs as relative
+    // file paths. Tidal's device-auth response is the usual
+    // offender — normalize here as a backstop in case callers hand
+    // in a bare host path.
+    let normalized = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("https://{}", url.trim())
+    };
+    std::process::Command::new("xdg-open")
+        .arg(&normalized)
+        .spawn()?;
     Ok(())
 }
 

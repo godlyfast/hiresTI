@@ -184,16 +184,23 @@ pub fn device_authorization(agent: &Agent) -> RtcResult<DeviceLogin> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| RtcError::Auth("missing deviceCode in device authorization response".into()))?
         .to_string();
-    let verification_uri = json
-        .get("verificationUri")
-        .and_then(|v| v.as_str())
-        .unwrap_or("link.tidal.com")
-        .to_string();
-    let verification_uri_complete = json
-        .get("verificationUriComplete")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&format!("link.tidal.com/{}", user_code))
-        .to_string();
+    // Tidal's device-authorization response returns these as bare
+    // host paths (e.g. `link.tidal.com/PCLMJ`) — without `https://`
+    // xdg-open / gio resolve them as relative file paths. Always
+    // normalize to a full URL so downstream consumers can hand them
+    // straight to a browser opener.
+    let verification_uri = ensure_https(
+        json.get("verificationUri")
+            .and_then(|v| v.as_str())
+            .unwrap_or("link.tidal.com"),
+    );
+    let verification_uri_complete = ensure_https(
+        &json
+            .get("verificationUriComplete")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("link.tidal.com/{user_code}")),
+    );
     let expires_in = json.get("expiresIn").and_then(|v| v.as_i64()).unwrap_or(300);
     let interval = json.get("interval").and_then(|v| v.as_i64()).unwrap_or(2);
     Ok(DeviceLogin {
@@ -271,6 +278,19 @@ pub fn refresh_access_token(
 
 fn form_pairs<'a>(map: &'a HashMap<&'a str, &'a str>) -> Vec<(&'a str, &'a str)> {
     map.iter().map(|(k, v)| (*k, *v)).collect()
+}
+
+/// Prepend `https://` if the URI doesn't already carry an http(s) scheme.
+/// Tidal's device-auth response returns bare host paths like
+/// `link.tidal.com/USERCODE`; without normalization, xdg-open / gio
+/// resolve those as relative file paths and the browser open fails.
+fn ensure_https(uri: &str) -> String {
+    let trimmed = uri.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    }
 }
 
 /// Re-encodes a UTF-8 string to a `Authorization: Basic ...` header value.
