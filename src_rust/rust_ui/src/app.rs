@@ -22,6 +22,7 @@ use relm4::{
     SimpleComponent,
 };
 
+use crate::components::about_dialog;
 use crate::components::content_stack::{
     ContentStackInit, ContentStackInput, ContentStackModel,
 };
@@ -109,6 +110,11 @@ pub struct AppController {
     /// fails (no usable native transport) — playback flows degrade to
     /// log-only without crashing the UI.
     engine: Option<Engine>,
+
+    /// Top-level window clone — kept so one-shot dialogs (About,
+    /// Settings, etc.) can parent themselves modally without each
+    /// click going through update_view.
+    window_for_dialogs: ApplicationWindow,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -407,6 +413,7 @@ impl SimpleComponent for AppController {
             detail: None,
             play_request_counter: 0,
             engine,
+            window_for_dialogs: root.clone(),
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -489,7 +496,7 @@ impl SimpleComponent for AppController {
                 tracing::info!("settings dialog requested (Phase 8)");
             }
             AppInput::OpenAbout => {
-                tracing::info!("about dialog requested (Phase 8)");
+                about_dialog::present(self.window_for_dialogs.upcast_ref());
             }
             AppInput::TransportPlay => {
                 // Phase 7-D: if we already have a buffered URI, resume.

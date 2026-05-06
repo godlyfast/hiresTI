@@ -6,6 +6,7 @@
 //! and matches Relm4's recommended pattern: parents pass init data down,
 //! children emit output up; no shared mutable refs.
 
+pub mod about_dialog;
 pub mod content_stack;
 pub mod header;
 pub mod login_dialog;
