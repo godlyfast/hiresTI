@@ -32,8 +32,9 @@ pub enum AppInput {
     ApplySettings(Settings),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum NavTarget {
+    #[default]
     Home,
     New,
     Top,

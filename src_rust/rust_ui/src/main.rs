@@ -14,6 +14,7 @@ mod messages;
 mod model;
 mod paths;
 mod settings;
+mod state;
 
 use std::process::ExitCode;
 

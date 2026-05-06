@@ -18,6 +18,15 @@ mod session;
 mod stream;
 mod tail;
 
+// Public Rust API for in-workspace consumers (rust_ui). The C ABI further
+// down stays the canonical surface for the legacy ctypes path; Rust callers
+// avoid the JSON round-trip by going through these direct types instead.
+pub mod api {
+    pub use crate::error::{RtcError, RtcResult};
+    pub use crate::models::{Album, Artist, Mix, Playlist, Track};
+    pub use crate::session::{Session, UserInfo};
+}
+
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
