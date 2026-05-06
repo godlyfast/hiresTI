@@ -220,7 +220,19 @@ where
 
     row.set_child(Some(&body));
 
-    row.connect_activate(move |_| on_play());
+    // GTK4 ListBoxRow + activate-on-single-click on the parent
+    // ListBox doesn't reliably fire `connect_activate` for clicks
+    // on the row's child labels. A GestureClick on the row itself
+    // (same pattern the album cards use) catches the press
+    // unambiguously, regardless of which inner label was hit.
+    let click = gtk::GestureClick::new();
+    click.connect_pressed(move |_, n_press, _, _| {
+        if n_press == 1 {
+            tracing::debug!("track row clicked");
+            on_play();
+        }
+    });
+    row.add_controller(click);
     row
 }
 
