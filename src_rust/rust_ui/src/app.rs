@@ -326,6 +326,16 @@ impl SimpleComponent for AppController {
         };
         let _ = &mut engine; // suppress warning if Engine::new always succeeds
 
+        // ---- Playback tick --------------------------------------------
+        // 1s cadence is plenty for the seek scale; finer-grained position
+        // is read on demand if Phase 8 adds a Now Playing window with a
+        // seek thumb that follows decode timing.
+        let s = sender.clone();
+        glib::timeout_add_seconds_local(1, move || {
+            let _ = s.input_sender().send(AppInput::PlaybackTick);
+            glib::ControlFlow::Continue
+        });
+
         // ---- Cold-start auth restore ----------------------------------
         // If a token file exists, kick off load_token + check_login on a
         // worker thread. We don't block init() because /v1/sessions can
@@ -539,6 +549,9 @@ impl SimpleComponent for AppController {
                 tracing::warn!(request_id, error = %error, "play resolve failed");
                 self.model.playback.transport = TransportState::Stopped;
             }
+            AppInput::PlaybackTick => {
+                self.tick_playback_position();
+            }
         }
     }
 
@@ -610,6 +623,34 @@ impl AppController {
             // need their own component shape — Phase 6.5.
             NavTarget::Genres | NavTarget::Decades | NavTarget::Moods => {}
         }
+    }
+
+    fn tick_playback_position(&mut self) {
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        if !matches!(self.model.playback.transport, TransportState::Playing) {
+            return;
+        }
+        let pos = engine.position_seconds().max(0.0);
+        let dur = {
+            let from_engine = engine.duration_seconds();
+            if from_engine > 0.0 {
+                from_engine
+            } else {
+                self.model.playback.duration.as_secs_f64().max(0.0)
+            }
+        };
+        self.model.playback.position = std::time::Duration::from_secs_f64(pos);
+        let fraction = if dur > 0.001 {
+            (pos / dur).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.mini
+            .sender()
+            .send(MiniPlayerInput::SetProgress(fraction))
+            .ok();
     }
 
     fn start_play_track(&mut self, track_id: i64, sender: ComponentSender<Self>) {

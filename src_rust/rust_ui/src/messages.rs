@@ -99,6 +99,10 @@ pub enum AppInput {
         request_id: u64,
         error: String,
     },
+    /// Periodic timer tick — recomputes the seek-bar position from the
+    /// engine's current play head. Keeps the mini-player progress
+    /// scrubbing in real time without per-decoded-frame events.
+    PlaybackTick,
 }
 
 #[derive(Debug, Clone)]
