@@ -240,9 +240,11 @@ impl TidalSessionService {
     }
 
     /// Resolve a track to a playable stream. Fetches the metadata + the
-    /// playback envelope on the same thread (two HTTP calls in sequence
-    /// — both are required to render the now-playing surface and queue
-    /// the engine, and parallelizing them only saves a few hundred ms).
+    /// playback envelope on the same thread. When the modern envelope
+    /// returns an MPD/DASH manifest (rust_audio_core can't feed those
+    /// yet), fall back to the legacy `urlpostpaywall` endpoint to grab
+    /// a single playable URL — same fallback the Python code does for
+    /// non-PKCE tokens.
     /// `audio_quality` follows TIDAL's enum: LOW / HIGH / LOSSLESS /
     /// HI_RES_LOSSLESS.
     pub fn resolve_playback_blocking(
@@ -252,12 +254,35 @@ impl TidalSessionService {
     ) -> Result<ResolvedPlayback, RtcError> {
         let track = self.session.fetch_track(track_id)?;
         let info = self.session.fetch_stream(track_id, audio_quality, None, None)?;
-        let url = info.urls.first().cloned();
-        let mpd_manifest = if info.is_mpd {
+        let mut url = info.urls.first().cloned();
+        let is_mpd = info.is_mpd;
+        let mpd_manifest = if is_mpd {
             Some(info.manifest_data.clone())
         } else {
             None
         };
+
+        // MPD fallback: rust_audio_core doesn't feed DASH segments yet,
+        // so try the legacy `urlpostpaywall` endpoint (single URL).
+        // Skipped for PKCE tokens because TIDAL rejects PKCE auth on
+        // the legacy endpoint at hi-res quality.
+        if is_mpd && url.is_none() && !self.session.is_pkce() {
+            let legacy_quality = if audio_quality == "HI_RES_LOSSLESS" {
+                "LOSSLESS"
+            } else {
+                audio_quality
+            };
+            match self.session.fetch_legacy_url(track_id, legacy_quality) {
+                Ok(legacy) => {
+                    tracing::info!(track_id, legacy_quality, "MPD fallback to legacy URL");
+                    url = Some(legacy);
+                }
+                Err(e) => {
+                    tracing::warn!(track_id, error = %e, "MPD legacy URL fallback failed");
+                }
+            }
+        }
+
         Ok(ResolvedPlayback {
             track,
             url,
@@ -266,7 +291,7 @@ impl TidalSessionService {
             sample_rate: info.sample_rate,
             bit_depth: info.bit_depth,
             is_bts: info.is_bts,
-            is_mpd: info.is_mpd,
+            is_mpd,
         })
     }
 

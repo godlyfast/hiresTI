@@ -863,16 +863,17 @@ impl AppController {
         self.model.playback.duration =
             std::time::Duration::from_secs(track.duration.max(0) as u64);
 
-        // Hand the URL to rust_audio_core. MPD manifests aren't wired
-        // yet — those need a DASH-aware feeder in the engine, which
-        // Phase 7-E plumbs. For now MPD tracks log a warning and stay
-        // in Buffering.
-        if resolved.is_mpd {
-            tracing::warn!(track_id = track.id, "MPD manifest playback not yet wired");
-            return;
-        }
+        // Hand the URL to rust_audio_core. The resolver already falls
+        // back to the legacy URL endpoint for MPD manifests so we
+        // expect a single playable URL here for both BTS and MPD; if
+        // the fallback was suppressed (PKCE token + hi-res quality)
+        // there'll be no URL and we degrade to a stop.
         let Some(url) = resolved.url else {
-            tracing::warn!(track_id = track.id, "stream resolved without a URL");
+            tracing::warn!(
+                track_id = track.id,
+                is_mpd = resolved.is_mpd,
+                "stream resolved without a URL"
+            );
             self.model.playback.transport = TransportState::Stopped;
             return;
         };
