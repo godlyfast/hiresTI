@@ -13,17 +13,24 @@ pub struct MiniPlayerModel {
     artist: String,
     /// Position fraction 0.0..=1.0; the seek scale binds to this.
     progress: f64,
+    /// Drives the play/pause button icon + click semantics. `Playing`
+    /// shows the pause icon and emits `Pause`; everything else shows
+    /// play and emits `Play`.
+    is_playing: bool,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // both senders wire in Phase 4 (audio engine)
 pub enum MiniPlayerInput {
     SetNowPlaying { title: String, artist: String },
     SetProgress(f64),
+    SetIsPlaying(bool),
+    /// Internal: the user clicked the central transport button. The
+    /// model decides whether that means Play or Pause and emits the
+    /// matching Output.
+    TogglePlayClicked,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Pause is emitted by Phase 4 once transport state lands
 pub enum MiniPlayerOutput {
     Play,
     Pause,
@@ -36,6 +43,7 @@ pub struct MiniPlayerWidgets {
     title_label: Label,
     artist_label: Label,
     seek: Scale,
+    play_btn: Button,
 }
 
 impl SimpleComponent for MiniPlayerModel {
@@ -123,9 +131,7 @@ impl SimpleComponent for MiniPlayerModel {
             .build();
         let s = sender.clone();
         play_btn.connect_clicked(move |_| {
-            // Phase 3: only emit Play. Pause/play toggle wires in Phase 4
-            // when transport state is real.
-            let _ = s.output(MiniPlayerOutput::Play);
+            let _ = s.input_sender().send(MiniPlayerInput::TogglePlayClicked);
         });
         root.append(&play_btn);
 
@@ -143,16 +149,18 @@ impl SimpleComponent for MiniPlayerModel {
             title: "Nothing playing".into(),
             artist: String::new(),
             progress: 0.0,
+            is_playing: false,
         };
         let widgets = MiniPlayerWidgets {
             title_label,
             artist_label,
             seek,
+            play_btn,
         };
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             MiniPlayerInput::SetNowPlaying { title, artist } => {
                 self.title = title;
@@ -161,6 +169,17 @@ impl SimpleComponent for MiniPlayerModel {
             MiniPlayerInput::SetProgress(p) => {
                 self.progress = p.clamp(0.0, 1.0);
             }
+            MiniPlayerInput::SetIsPlaying(playing) => {
+                self.is_playing = playing;
+            }
+            MiniPlayerInput::TogglePlayClicked => {
+                let out = if self.is_playing {
+                    MiniPlayerOutput::Pause
+                } else {
+                    MiniPlayerOutput::Play
+                };
+                let _ = sender.output(out);
+            }
         }
     }
 
@@ -168,6 +187,13 @@ impl SimpleComponent for MiniPlayerModel {
         widgets.title_label.set_label(&self.title);
         widgets.artist_label.set_label(&self.artist);
         widgets.seek.set_value(self.progress);
+        if self.is_playing {
+            widgets.play_btn.set_icon_name("media-playback-pause-symbolic");
+            widgets.play_btn.set_tooltip_text(Some("Pause"));
+        } else {
+            widgets.play_btn.set_icon_name("media-playback-start-symbolic");
+            widgets.play_btn.set_tooltip_text(Some("Play"));
+        }
     }
 }
 

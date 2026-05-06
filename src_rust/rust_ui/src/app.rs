@@ -599,6 +599,11 @@ impl SimpleComponent for AppController {
             .sender()
             .send(HeaderInput::SetDetailOpen(self.detail.is_some()))
             .ok();
+        let is_playing = matches!(self.model.playback.transport, TransportState::Playing);
+        self.mini
+            .sender()
+            .send(MiniPlayerInput::SetIsPlaying(is_playing))
+            .ok();
     }
 }
 
