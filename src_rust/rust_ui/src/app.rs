@@ -22,14 +22,23 @@ use relm4::{
     SimpleComponent,
 };
 
-use crate::components::content_stack::{ContentStackInput, ContentStackModel};
+use crate::components::content_stack::{
+    ContentStackInit, ContentStackInput, ContentStackModel,
+};
 use crate::components::header::{HeaderInput, HeaderModel, HeaderOutput};
 use crate::components::login_dialog::{
     LoginDialogInput, LoginDialogModel, LoginDialogOutput,
 };
 use crate::components::mini_player::{MiniPlayerModel, MiniPlayerOutput};
 use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
-use crate::messages::{AppInput, AuthPollOutcome};
+use crate::components::views::albums::{AlbumsViewInput, AlbumsViewModel};
+use crate::components::views::artists::{ArtistsViewInput, ArtistsViewModel};
+use crate::components::views::common::LibraryViewOutput;
+use crate::components::views::history::{HistoryViewInput, HistoryViewModel};
+use crate::components::views::mixes::{MixesViewInput, MixesViewModel};
+use crate::components::views::playlists::{PlaylistsViewInput, PlaylistsViewModel};
+use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
+use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
 use crate::settings::Settings;
@@ -51,6 +60,16 @@ pub struct AppController {
     #[allow(dead_code)]
     mini: Controller<MiniPlayerModel>,
     login: Controller<LoginDialogModel>,
+
+    // Library views (Phase 5). Each owns its own data fetch; the
+    // parent dispatches Refresh on first navigation.
+    albums_view: Controller<AlbumsViewModel>,
+    tracks_view: Controller<TracksViewModel>,
+    artists_view: Controller<ArtistsViewModel>,
+    playlists_view: Controller<PlaylistsViewModel>,
+    mixes_view: Controller<MixesViewModel>,
+    #[allow(dead_code)]
+    history_view: Controller<HistoryViewModel>,
 }
 
 pub struct AppWidgets {
@@ -98,8 +117,49 @@ impl SimpleComponent for AppController {
                 SidebarOutput::Navigate(t) => AppInput::NavigateTo(t),
             });
 
+        // Library view controllers. Each gets a clone of the session
+        // service. They forward LibraryViewOutput up into AppInput so
+        // the root can dispatch detail/play actions.
+        let lib_forward = |out: LibraryViewOutput| match out {
+            LibraryViewOutput::OpenAlbum { id, title } => AppInput::OpenAlbum { id, title },
+            LibraryViewOutput::OpenArtist { id, name } => AppInput::OpenArtist { id, name },
+            LibraryViewOutput::OpenPlaylist { uuid, title } => {
+                AppInput::OpenPlaylist { uuid, title }
+            }
+            LibraryViewOutput::OpenMix { id, title } => AppInput::OpenMix { id, title },
+            LibraryViewOutput::PlayTrack { track_id } => AppInput::PlayTrack { track_id },
+        };
+        let albums_view = AlbumsViewModel::builder()
+            .launch(session.clone())
+            .forward(sender.input_sender(), lib_forward);
+        let tracks_view = TracksViewModel::builder()
+            .launch(session.clone())
+            .forward(sender.input_sender(), lib_forward);
+        let artists_view = ArtistsViewModel::builder()
+            .launch(session.clone())
+            .forward(sender.input_sender(), lib_forward);
+        let playlists_view = PlaylistsViewModel::builder()
+            .launch(session.clone())
+            .forward(sender.input_sender(), lib_forward);
+        let mixes_view = MixesViewModel::builder()
+            .launch(session.clone())
+            .forward(sender.input_sender(), lib_forward);
+        let history_view = HistoryViewModel::builder()
+            .launch(())
+            .forward(sender.input_sender(), lib_forward);
+
         let content = ContentStackModel::builder()
-            .launch(init.current_nav)
+            .launch(ContentStackInit {
+                current: init.current_nav,
+                pages: vec![
+                    (NavTarget::Albums, albums_view.widget().clone().into()),
+                    (NavTarget::Tracks, tracks_view.widget().clone().into()),
+                    (NavTarget::Artists, artists_view.widget().clone().into()),
+                    (NavTarget::Playlists, playlists_view.widget().clone().into()),
+                    (NavTarget::MixesAndRadio, mixes_view.widget().clone().into()),
+                    (NavTarget::History, history_view.widget().clone().into()),
+                ],
+            })
             .detach();
 
         let mini = MiniPlayerModel::builder().launch(()).forward(
@@ -178,6 +238,12 @@ impl SimpleComponent for AppController {
             content,
             mini,
             login,
+            albums_view,
+            tracks_view,
+            artists_view,
+            playlists_view,
+            mixes_view,
+            history_view,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -191,6 +257,10 @@ impl SimpleComponent for AppController {
                 self.persist_settings();
                 self.sidebar.sender().send(SidebarInput::SetActive(target)).ok();
                 self.content.sender().send(ContentStackInput::Show(target)).ok();
+                // First navigation to a library view triggers a fetch.
+                // Subsequent navigations don't re-fetch (the view's own
+                // state machine guards against re-entrant Loading).
+                self.dispatch_view_refresh(target);
             }
             AppInput::WindowResized { width, height } => {
                 if self.model.settings.remember_window_size {
@@ -233,6 +303,12 @@ impl SimpleComponent for AppController {
 
             AppInput::AuthRestoreResult(profile) => {
                 self.apply_auth_result(profile);
+                // If the user landed on a library page (typical case
+                // when last_nav is e.g. "albums"), kick off its first
+                // fetch now that auth is ready.
+                if self.model.auth.is_logged_in() {
+                    self.dispatch_view_refresh(self.model.current_nav);
+                }
             }
             AppInput::AuthDeviceStarted(info) => {
                 self.poll_cancelled.store(false, Ordering::SeqCst);
@@ -280,6 +356,22 @@ impl SimpleComponent for AppController {
             AppInput::CopyToClipboard(text) => {
                 copy_to_clipboard(&text);
             }
+
+            AppInput::OpenAlbum { id, title } => {
+                tracing::info!(%id, %title, "open album (Phase 7 wires the detail view)");
+            }
+            AppInput::OpenArtist { id, name } => {
+                tracing::info!(%id, %name, "open artist (Phase 7 wires the detail view)");
+            }
+            AppInput::OpenPlaylist { uuid, title } => {
+                tracing::info!(%uuid, %title, "open playlist (Phase 7 wires the detail view)");
+            }
+            AppInput::OpenMix { id, title } => {
+                tracing::info!(%id, %title, "open mix (Phase 7 wires the detail view)");
+            }
+            AppInput::PlayTrack { track_id } => {
+                tracing::info!(track_id, "play track (Phase 7 wires the playback path)");
+            }
         }
     }
 
@@ -302,6 +394,38 @@ impl AppController {
     fn persist_settings(&self) {
         if let Err(e) = self.model.settings.save() {
             tracing::warn!(error = %e, "settings save failed");
+        }
+    }
+
+    /// On navigation, ask the destination view to fetch its data. The
+    /// view's own state machine ignores Refresh while Loading and reuses
+    /// already-loaded results, so this is cheap to call on every nav.
+    fn dispatch_view_refresh(&self, target: NavTarget) {
+        if !self.model.auth.is_logged_in() {
+            return;
+        }
+        match target {
+            NavTarget::Albums => {
+                self.albums_view.sender().send(AlbumsViewInput::Refresh).ok();
+            }
+            NavTarget::Tracks => {
+                self.tracks_view.sender().send(TracksViewInput::Refresh).ok();
+            }
+            NavTarget::Artists => {
+                self.artists_view.sender().send(ArtistsViewInput::Refresh).ok();
+            }
+            NavTarget::Playlists => {
+                self.playlists_view.sender().send(PlaylistsViewInput::Refresh).ok();
+            }
+            NavTarget::MixesAndRadio => {
+                self.mixes_view.sender().send(MixesViewInput::Refresh).ok();
+            }
+            NavTarget::History => {
+                self.history_view.sender().send(HistoryViewInput::Refresh).ok();
+            }
+            // Discovery views (Home / New / Top / Hi-Res / Genres /
+            // Decades / Moods) wire in Phase 6.
+            _ => {}
         }
     }
 

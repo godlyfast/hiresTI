@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::thread;
 
 use rust_tidal_core::api::{
-    read_persisted_token, write_persisted_token, DeviceLogin, PersistedToken, RequestArgs,
-    RtcError, Session, UserInfo,
+    read_persisted_token, write_persisted_token, Album, Artist, DeviceLogin, ListArgs, Mix,
+    PersistedToken, Playlist, RequestArgs, RtcError, Session, Track, UserInfo,
 };
 
 use crate::error::{AppError, AppResult};
@@ -126,6 +126,29 @@ impl TidalSessionService {
         self.session.oauth_device_poll()
     }
 
+    // ---- Paginated favorites listings -----------------------------
+    //
+    // Each helper drains pages until the server reports the full count,
+    // matching the Python fetch loop. The page size is intentionally
+    // larger than the 50 default — for large collections the round-trip
+    // cost dominates so fewer-bigger pages are cheaper.
+
+    pub fn list_favorite_albums_blocking(&self) -> Result<Vec<Album>, RtcError> {
+        drain_pages(|args| self.session.list_favorite_albums(args))
+    }
+    pub fn list_favorite_artists_blocking(&self) -> Result<Vec<Artist>, RtcError> {
+        drain_pages(|args| self.session.list_favorite_artists(args))
+    }
+    pub fn list_favorite_tracks_blocking(&self) -> Result<Vec<Track>, RtcError> {
+        drain_pages(|args| self.session.list_favorite_tracks(args))
+    }
+    pub fn list_favorite_mixes_blocking(&self) -> Result<Vec<Mix>, RtcError> {
+        drain_pages(|args| self.session.list_favorite_mixes(args))
+    }
+    pub fn list_user_playlists_blocking(&self) -> Result<Vec<Playlist>, RtcError> {
+        drain_pages(|args| self.session.list_user_playlists("root", args))
+    }
+
     /// Read the user-profile fields from `/v1/users/{id}` and merge with
     /// the `UserInfo` we already have. Mirrors the Python
     /// `_build_user_view` helper introduced in commit a0ef6b71.
@@ -151,6 +174,40 @@ impl TidalSessionService {
             )))
         }
     }
+}
+
+/// Drain a paged TIDAL listing endpoint into a single Vec. We ask for
+/// 200 items per page; TIDAL clamps to its own internal max (1000 for
+/// most endpoints) so even huge collections come down in 5-10 calls.
+const PAGE_SIZE: i32 = 200;
+
+fn drain_pages<T, F>(mut fetch: F) -> Result<Vec<T>, RtcError>
+where
+    F: FnMut(&ListArgs) -> Result<rust_tidal_core::api::PageResponse<T>, RtcError>,
+{
+    let mut out: Vec<T> = Vec::new();
+    let mut offset: i32 = 0;
+    loop {
+        let args = ListArgs {
+            limit: PAGE_SIZE,
+            offset,
+            order: None,
+            order_direction: None,
+        };
+        let page = fetch(&args)?;
+        let n = page.items.len() as i32;
+        out.extend(page.items);
+        if n < PAGE_SIZE || (page.total_number_of_items > 0 && out.len() as i32 >= page.total_number_of_items) {
+            break;
+        }
+        offset += n;
+        // Defensive cap so a bug in `total_number_of_items` can't loop us forever.
+        if offset > 100_000 {
+            tracing::warn!(offset, "drain_pages safety cap hit");
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Helper: spawn `f` on a fresh thread and call `cb` with its result.

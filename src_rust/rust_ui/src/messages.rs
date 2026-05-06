@@ -72,6 +72,13 @@ pub enum AppInput {
 
     /// Copy `text` to the system clipboard via the default Gdk display.
     CopyToClipboard(String),
+
+    // ---- Library view outputs (Phase 5) ----------------------------
+    OpenAlbum { id: String, title: String },
+    OpenArtist { id: String, name: String },
+    OpenPlaylist { uuid: String, title: String },
+    OpenMix { id: String, title: String },
+    PlayTrack { track_id: i64 },
 }
 
 #[derive(Debug, Clone)]
