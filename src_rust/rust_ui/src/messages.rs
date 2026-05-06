@@ -79,6 +79,14 @@ pub enum AppInput {
     OpenPlaylist { uuid: String, title: String },
     OpenMix { id: String, title: String },
     PlayTrack { track_id: i64 },
+    /// Play `tracks[start_index]` and load the rest as the queue. The
+    /// payload is owned (Vec<Track>) so the originating view's local
+    /// state is decoupled from the playback queue.
+    PlayContext {
+        tracks: Vec<rust_tidal_core::api::Track>,
+        start_index: usize,
+        source: crate::state::playback::PlaybackSource,
+    },
 
     // ---- Detail navigation (Phase 7-A) -----------------------------
     /// Pop the currently-open detail surface and return to the active

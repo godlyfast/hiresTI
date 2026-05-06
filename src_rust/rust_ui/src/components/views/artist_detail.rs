@@ -49,7 +49,9 @@ pub enum ArtistDetailInput {
     TopTracksFailed { token: u64, error: String },
     AlbumsResult { token: u64, items: Vec<Album> },
     AlbumsFailed { token: u64, error: String },
-    Play(i64),
+    /// Index into `top_tracks` — handler emits PlayContext with the
+    /// artist's top tracks as the queue source.
+    Play(usize),
     OpenAlbum(i64, String),
 }
 
@@ -244,8 +246,22 @@ impl SimpleComponent for ArtistDetailViewModel {
                 self.albums_done = true;
                 self.maybe_finish();
             }
-            ArtistDetailInput::Play(track_id) => {
-                let _ = sender.output(LibraryViewOutput::PlayTrack { track_id });
+            ArtistDetailInput::Play(idx) => {
+                if idx < self.top_tracks.len() {
+                    let name = self
+                        .artist
+                        .as_ref()
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| self.initial_name.clone());
+                    let _ = sender.output(LibraryViewOutput::PlayContext {
+                        tracks: self.top_tracks.clone(),
+                        start_index: idx,
+                        source: crate::state::playback::PlaybackSource::Artist {
+                            id: self.artist_id.to_string(),
+                            name,
+                        },
+                    });
+                }
             }
             ArtistDetailInput::OpenAlbum(id, title) => {
                 let _ = sender.output(LibraryViewOutput::OpenAlbum {
@@ -287,8 +303,8 @@ impl SimpleComponent for ArtistDetailViewModel {
                 .build();
             for (idx, track) in self.top_tracks.iter().enumerate() {
                 let s = sender.clone();
-                let row = build_track_row(idx + 1, track, move |id| {
-                    let _ = s.input_sender().send(ArtistDetailInput::Play(id));
+                let row = build_track_row(idx + 1, track, move || {
+                    let _ = s.input_sender().send(ArtistDetailInput::Play(idx));
                 });
                 list.append(&row);
             }

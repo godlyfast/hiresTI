@@ -49,7 +49,9 @@ pub enum AlbumDetailInput {
     HeaderFailed { token: u64, error: String },
     TracksResult { token: u64, items: Vec<Track> },
     TracksFailed { token: u64, error: String },
-    Play(i64),
+    /// Index into `tracks` — handler emits PlayContext with the album
+    /// as the queue source.
+    Play(usize),
     OpenArtist(i64, String),
 }
 
@@ -188,8 +190,22 @@ impl SimpleComponent for AlbumDetailViewModel {
                 self.state = ViewLoadState::Failed(error);
                 self.tracks_done = true;
             }
-            AlbumDetailInput::Play(track_id) => {
-                let _ = sender.output(LibraryViewOutput::PlayTrack { track_id });
+            AlbumDetailInput::Play(idx) => {
+                if idx < self.tracks.len() {
+                    let title = self
+                        .album
+                        .as_ref()
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| self.initial_title.clone());
+                    let _ = sender.output(LibraryViewOutput::PlayContext {
+                        tracks: self.tracks.clone(),
+                        start_index: idx,
+                        source: crate::state::playback::PlaybackSource::Album {
+                            id: self.album_id.to_string(),
+                            title,
+                        },
+                    });
+                }
             }
             AlbumDetailInput::OpenArtist(id, name) => {
                 let _ = sender.output(LibraryViewOutput::OpenArtist {
@@ -229,8 +245,8 @@ impl SimpleComponent for AlbumDetailViewModel {
             .build();
         for (idx, track) in self.tracks.iter().enumerate() {
             let s = sender.clone();
-            let row = build_track_row(idx + 1, track, move |id| {
-                let _ = s.input_sender().send(AlbumDetailInput::Play(id));
+            let row = build_track_row(idx + 1, track, move || {
+                let _ = s.input_sender().send(AlbumDetailInput::Play(idx));
             });
             list.append(&row);
         }

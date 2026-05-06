@@ -412,6 +412,7 @@ impl SimpleComponent for AppController {
                     let _ = engine.stop();
                 }
                 self.model.playback = Default::default();
+                self.model.queue = Default::default();
                 self.mini
                     .sender()
                     .send(MiniPlayerInput::SetNowPlaying {
@@ -465,10 +466,11 @@ impl SimpleComponent for AppController {
                     }
                 }
             }
-            AppInput::TransportNext | AppInput::TransportPrev => {
-                // Queue navigation arrives in Phase 7-E with the queue
-                // manager. For now log and leave engine state alone.
-                tracing::info!(?msg, "transport next/prev (Phase 7-E queues this)");
+            AppInput::TransportNext => {
+                self.advance_queue(1, sender.clone());
+            }
+            AppInput::TransportPrev => {
+                self.advance_queue(-1, sender.clone());
             }
             AppInput::TransportSeek(p) => {
                 if let Some(engine) = self.engine.as_mut() {
@@ -562,7 +564,26 @@ impl SimpleComponent for AppController {
                 self.close_detail();
             }
             AppInput::PlayTrack { track_id } => {
+                // Single-track play: clear the queue so Next/Prev can't
+                // pull stale rows from a previous list.
+                self.model.queue = Default::default();
+                self.model.playback.source =
+                    crate::state::playback::PlaybackSource::SingleTrack;
                 self.start_play_track(track_id, sender.clone());
+            }
+            AppInput::PlayContext {
+                tracks,
+                start_index,
+                source,
+            } => {
+                if let Some(track) = tracks.get(start_index) {
+                    let track_id = track.id;
+                    self.model.queue.tracks = tracks;
+                    self.model.queue.current_index = start_index;
+                    self.model.queue.shuffle_order = None;
+                    self.model.playback.source = source;
+                    self.start_play_track(track_id, sender.clone());
+                }
             }
             AppInput::NowPlayingResolved {
                 request_id,
@@ -656,6 +677,30 @@ impl AppController {
             // need their own component shape — Phase 6.5.
             NavTarget::Genres | NavTarget::Decades | NavTarget::Moods => {}
         }
+    }
+
+    /// Step the queue by `delta` (+1 = next, -1 = prev) and start
+    /// playing the new track. PlayMode interactions (Loop / One /
+    /// Shuffle / Smart) come in Phase 8 — for now this is straight
+    /// linear walk with end-of-queue clamp + start-of-queue clamp.
+    fn advance_queue(&mut self, delta: i32, sender: ComponentSender<Self>) {
+        let queue = &self.model.queue;
+        if queue.tracks.is_empty() {
+            return;
+        }
+        let cur = queue.current_index as i32;
+        let next = cur + delta;
+        if next < 0 || next as usize >= queue.tracks.len() {
+            tracing::debug!(delta, cur, "queue boundary — no advance");
+            return;
+        }
+        let next_idx = next as usize;
+        let Some(track) = queue.tracks.get(next_idx) else {
+            return;
+        };
+        let track_id = track.id;
+        self.model.queue.current_index = next_idx;
+        self.start_play_track(track_id, sender);
     }
 
     fn tick_playback_position(&mut self) {
@@ -977,6 +1022,15 @@ fn make_lib_forward() -> impl Fn(LibraryViewOutput) -> AppInput + 'static + Copy
         }
         LibraryViewOutput::OpenMix { id, title } => AppInput::OpenMix { id, title },
         LibraryViewOutput::PlayTrack { track_id } => AppInput::PlayTrack { track_id },
+        LibraryViewOutput::PlayContext {
+            tracks,
+            start_index,
+            source,
+        } => AppInput::PlayContext {
+            tracks,
+            start_index,
+            source,
+        },
     }
 }
 

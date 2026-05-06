@@ -14,6 +14,8 @@ use relm4::gtk::{
 
 use rust_tidal_core::api::{Album, ArtistRef, Track};
 
+use crate::state::playback::PlaybackSource;
+
 #[derive(Debug, Clone, Default)]
 pub enum ViewLoadState {
     #[default]
@@ -40,13 +42,22 @@ impl ViewLoadState {
 /// page the user wants to open; the root component is responsible for
 /// dispatching to the appropriate detail-view component (Phase 7).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // OpenArtist/OpenMix/OpenPlaylist/PlayTrack land in Phase 7
 pub enum LibraryViewOutput {
     OpenAlbum { id: String, title: String },
     OpenArtist { id: String, name: String },
     OpenPlaylist { uuid: String, title: String },
     OpenMix { id: String, title: String },
+    /// Single-track play with no list context. Used by discovery promo
+    /// cards and other one-off Play sources. Clears the queue.
     PlayTrack { track_id: i64 },
+    /// Play `tracks[start_index]` and load the rest as the queue so
+    /// Next/Prev can navigate. `source` describes where the queue came
+    /// from for the Now Playing breadcrumb.
+    PlayContext {
+        tracks: Vec<Track>,
+        start_index: usize,
+        source: PlaybackSource,
+    },
 }
 
 /// Centered spinner for the Loading state. Same shape across every view.
@@ -131,12 +142,12 @@ pub fn album_artist_name(album: &Album) -> String {
 
 /// Standard track-list row used by Tracks / AlbumDetail / PlaylistDetail
 /// / MixDetail / ArtistDetail. Layout is `<index>  <title> <artist>
-/// <duration>`. The `on_play` closure is invoked on row activation so
-/// each caller can wire the click to its own component-specific Input
-/// enum without sharing a sender type.
+/// <duration>`. The `on_play` closure runs on row activation; each
+/// caller's closure already knows its position in the list, so the
+/// callback takes no arguments.
 pub fn build_track_row<F>(idx: usize, track: &Track, on_play: F) -> ListBoxRow
 where
-    F: Fn(i64) + 'static,
+    F: Fn() + 'static,
 {
     let row = ListBoxRow::builder()
         .css_classes(["track-row"])
@@ -191,8 +202,7 @@ where
 
     row.set_child(Some(&body));
 
-    let track_id = track.id;
-    row.connect_activate(move |_| on_play(track_id));
+    row.connect_activate(move |_| on_play());
     row
 }
 

@@ -42,7 +42,9 @@ pub enum PlaylistDetailInput {
     HeaderFailed { token: u64, error: String },
     TracksResult { token: u64, items: Vec<Track> },
     TracksFailed { token: u64, error: String },
-    Play(i64),
+    /// Index into `tracks` — handler emits PlayContext with the playlist
+    /// as the queue source.
+    Play(usize),
 }
 
 pub struct PlaylistDetailWidgets {
@@ -180,8 +182,22 @@ impl SimpleComponent for PlaylistDetailViewModel {
                 self.state = ViewLoadState::Failed(error);
                 self.tracks_done = true;
             }
-            PlaylistDetailInput::Play(track_id) => {
-                let _ = sender.output(LibraryViewOutput::PlayTrack { track_id });
+            PlaylistDetailInput::Play(idx) => {
+                if idx < self.tracks.len() {
+                    let title = self
+                        .playlist
+                        .as_ref()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| self.initial_title.clone());
+                    let _ = sender.output(LibraryViewOutput::PlayContext {
+                        tracks: self.tracks.clone(),
+                        start_index: idx,
+                        source: crate::state::playback::PlaybackSource::Playlist {
+                            uuid: self.playlist_id.clone(),
+                            title,
+                        },
+                    });
+                }
             }
         }
     }
@@ -214,8 +230,8 @@ impl SimpleComponent for PlaylistDetailViewModel {
             .build();
         for (idx, track) in self.tracks.iter().enumerate() {
             let s = sender.clone();
-            let row = build_track_row(idx + 1, track, move |id| {
-                let _ = s.input_sender().send(PlaylistDetailInput::Play(id));
+            let row = build_track_row(idx + 1, track, move || {
+                let _ = s.input_sender().send(PlaylistDetailInput::Play(idx));
             });
             list.append(&row);
         }

@@ -41,7 +41,9 @@ pub enum MixDetailInput {
     HeaderFailed { token: u64, error: String },
     TracksResult { token: u64, items: Vec<Track> },
     TracksFailed { token: u64, error: String },
-    Play(i64),
+    /// Index into `tracks` — handler emits PlayContext with the mix
+    /// as the queue source.
+    Play(usize),
 }
 
 pub struct MixDetailWidgets {
@@ -176,8 +178,22 @@ impl SimpleComponent for MixDetailViewModel {
                 self.state = ViewLoadState::Failed(error);
                 self.tracks_done = true;
             }
-            MixDetailInput::Play(track_id) => {
-                let _ = sender.output(LibraryViewOutput::PlayTrack { track_id });
+            MixDetailInput::Play(idx) => {
+                if idx < self.tracks.len() {
+                    let title = self
+                        .mix
+                        .as_ref()
+                        .map(|m| m.title.clone())
+                        .unwrap_or_else(|| self.initial_title.clone());
+                    let _ = sender.output(LibraryViewOutput::PlayContext {
+                        tracks: self.tracks.clone(),
+                        start_index: idx,
+                        source: crate::state::playback::PlaybackSource::Mix {
+                            id: self.mix_id.clone(),
+                            title,
+                        },
+                    });
+                }
             }
         }
     }
@@ -209,8 +225,8 @@ impl SimpleComponent for MixDetailViewModel {
             .build();
         for (idx, track) in self.tracks.iter().enumerate() {
             let s = sender.clone();
-            let row = build_track_row(idx + 1, track, move |id| {
-                let _ = s.input_sender().send(MixDetailInput::Play(id));
+            let row = build_track_row(idx + 1, track, move || {
+                let _ = s.input_sender().send(MixDetailInput::Play(idx));
             });
             list.append(&row);
         }

@@ -24,7 +24,8 @@ pub enum TracksViewInput {
     Refresh,
     FetchResult { token: u64, items: Vec<Track> },
     FetchFailed { token: u64, error: String },
-    Play(i64),
+    /// Row index inside `items` — handler builds the queue context.
+    Play(usize),
 }
 
 pub struct TracksViewWidgets {
@@ -110,8 +111,14 @@ impl SimpleComponent for TracksViewModel {
                 }
                 self.state = ViewLoadState::Failed(error);
             }
-            TracksViewInput::Play(track_id) => {
-                let _ = sender.output(LibraryViewOutput::PlayTrack { track_id });
+            TracksViewInput::Play(idx) => {
+                if idx < self.items.len() {
+                    let _ = sender.output(LibraryViewOutput::PlayContext {
+                        tracks: self.items.clone(),
+                        start_index: idx,
+                        source: crate::state::playback::PlaybackSource::LikedTracks,
+                    });
+                }
             }
         }
     }
@@ -134,8 +141,8 @@ impl SimpleComponent for TracksViewModel {
                 } else {
                     for (idx, track) in self.items.iter().enumerate() {
                         let s = sender.clone();
-                        let row = build_track_row(idx + 1, track, move |id| {
-                            let _ = s.input_sender().send(TracksViewInput::Play(id));
+                        let row = build_track_row(idx + 1, track, move || {
+                            let _ = s.input_sender().send(TracksViewInput::Play(idx));
                         });
                         widgets.list.append(&row);
                     }
