@@ -1,2 +1,0 @@
-#!/bin/bash
-exec -a hiresti python3 "$(dirname "$(realpath "$0")")/src/main.py" "$@"

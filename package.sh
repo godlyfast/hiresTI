@@ -214,11 +214,10 @@ mkdir -p "$BUILD_ROOT"
 BIN_DIR="$BUILD_ROOT/usr/bin"
 APP_DIR="$BUILD_ROOT/usr/share/applications"
 SYSTEM_ICON_DIR="$BUILD_ROOT/usr/share/icons"
-METAINFO_DIR="$BUILD_ROOT/usr/share/metainfo"
 LICENSE_DIR="$BUILD_ROOT/usr/share/licenses/$APP_NAME"
 UDEV_DIR="$BUILD_ROOT/usr/lib/udev/rules.d"
 
-mkdir -p "$BIN_DIR" "$APP_DIR" "$SYSTEM_ICON_DIR" "$METAINFO_DIR" "$LICENSE_DIR" "$UDEV_DIR"
+mkdir -p "$BIN_DIR" "$APP_DIR" "$SYSTEM_ICON_DIR" "$LICENSE_DIR" "$UDEV_DIR"
 
 # udev rule
 cat <<'UDEV_EOF' > "$UDEV_DIR/99-hiresti-usb-audio.rules"
@@ -278,13 +277,7 @@ Categories=AudioVideo;Audio;Player;Music;
 StartupWMClass=$DISPLAY_NAME
 EOF
 
-# 4. AppStream metainfo (used by KDE Discover, GNOME Software)
-if [ -f "flatpak/com.hiresti.player.metainfo.xml" ]; then
-    install -Dm644 flatpak/com.hiresti.player.metainfo.xml \
-        "$METAINFO_DIR/$APP_ID.metainfo.xml"
-fi
-
-# 5. License
+# 4. License
 if [ -f "LICENSE" ]; then
     install -Dm644 LICENSE "$LICENSE_DIR/LICENSE"
 fi
@@ -368,7 +361,6 @@ udevadm trigger --subsystem-match=usb 2>/dev/null || true
 /usr/bin/$APP_NAME
 /usr/share/applications/$APP_ID.desktop
 /usr/share/icons/*
-/usr/share/metainfo/$APP_ID.metainfo.xml
 /usr/share/licenses/$APP_NAME/LICENSE
 /usr/lib/udev/rules.d/99-hiresti-usb-audio.rules
 

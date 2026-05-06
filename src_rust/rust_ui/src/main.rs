@@ -1,12 +1,6 @@
-//! `hiresti` GTK4 / libadwaita / Relm4 entry point.
-//!
-//! This binary is the eventual replacement for `python3 src/main.py`. It
-//! boots the GTK application, loads persisted settings, and hands off to
-//! the Relm4 component graph.
-//!
-//! See `docs/refactor-plan.md` (TODO) for the full migration plan; the
-//! short version is: Phase 1 = empty shell + settings round-trip, then
-//! views land top-down in subsequent phases.
+//! `hiresti` GTK4 / libadwaita / Relm4 entry point. Boots the GTK
+//! application, loads persisted settings, and hands off to the
+//! Relm4 component graph.
 
 mod app;
 mod components;

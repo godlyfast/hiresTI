@@ -75,6 +75,4 @@ Categories=AudioVideo;Audio;Player;Music;
 StartupWMClass=HiresTI
 EOF
 
-  install -Dm644 flatpak/com.hiresti.player.metainfo.xml \
-    "${pkgdir}/usr/share/metainfo/com.hiresti.player.metainfo.xml"
 }
