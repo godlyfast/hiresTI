@@ -408,7 +408,35 @@ impl SimpleComponent for AppController {
                 }
             }
             AppInput::LogoutRequested => {
-                tracing::info!("logout requested (Phase 8 will clear token + reload UI)");
+                if let Some(engine) = self.engine.as_mut() {
+                    let _ = engine.stop();
+                }
+                self.model.playback = Default::default();
+                self.mini
+                    .sender()
+                    .send(MiniPlayerInput::SetNowPlaying {
+                        title: "Nothing playing".into(),
+                        artist: String::new(),
+                    })
+                    .ok();
+                self.mini
+                    .sender()
+                    .send(MiniPlayerInput::SetProgress(0.0))
+                    .ok();
+                self.detail = None;
+                self.content
+                    .sender()
+                    .send(ContentStackInput::SetDetail(None))
+                    .ok();
+                match self.session.logout_blocking() {
+                    Ok(path) => {
+                        tracing::info!(?path, "logged out, token file removed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "logout failed");
+                    }
+                }
+                self.apply_auth_result(None);
             }
             AppInput::OpenSettings => {
                 tracing::info!("settings dialog requested (Phase 8)");

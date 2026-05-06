@@ -86,6 +86,20 @@ impl TidalSessionService {
         }
     }
 
+    /// Wipe the on-disk token file + the in-memory Session state.
+    /// Returns the path that was deleted (or attempted to be) so the
+    /// caller can log it. Missing-file is not an error.
+    pub fn logout_blocking(&self) -> AppResult<PathBuf> {
+        self.session.clear_token();
+        let path = Self::token_path()?;
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(?path, error = %e, "couldn't delete token file");
+            }
+        }
+        Ok(path)
+    }
+
     /// Save the current Session's token to disk atomically. Match the
     /// Python `save_session()` behavior: we round-trip via
     /// `token_snapshot` → `PersistedToken::from_token` so the file

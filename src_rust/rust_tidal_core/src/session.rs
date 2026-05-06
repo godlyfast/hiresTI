@@ -149,6 +149,18 @@ impl Session {
         self.inner.lock().token.clone()
     }
 
+    /// Wipe the in-memory token + user state. Use during logout —
+    /// callers also delete the on-disk token file separately. Pending
+    /// PKCE/device-code flows are cleared too so a logout in the middle
+    /// of a login attempt doesn't leave orphan state.
+    pub fn clear_token(&self) {
+        let mut state = self.inner.lock();
+        state.token = None;
+        state.user = None;
+        state.pending_pkce = None;
+        state.pending_device = None;
+    }
+
     pub fn user_snapshot(&self) -> Option<UserInfo> {
         self.inner.lock().user.clone()
     }
