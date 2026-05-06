@@ -14,4 +14,5 @@ pub mod login_dialog;
 pub mod mini_player;
 pub mod settings_dialog;
 pub mod sidebar;
+pub mod signal_path_window;
 pub mod views;

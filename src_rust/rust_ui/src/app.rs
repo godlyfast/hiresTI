@@ -28,6 +28,7 @@ use relm4::{
 use crate::components::about_dialog;
 use crate::components::diagnostics_dialog::{self, EngineSnapshot};
 use crate::components::settings_dialog;
+use crate::components::signal_path_window;
 use crate::components::content_stack::{
     ContentStackInit, ContentStackInput, ContentStackModel,
 };
@@ -179,6 +180,7 @@ impl SimpleComponent for AppController {
                 HeaderOutput::OpenSettings => AppInput::OpenSettings,
                 HeaderOutput::OpenAbout => AppInput::OpenAbout,
                 HeaderOutput::OpenDiagnostics => AppInput::OpenDiagnostics,
+                HeaderOutput::OpenSignalPath => AppInput::OpenSignalPath,
                 HeaderOutput::BackPressed => AppInput::CloseDetail,
             },
         );
@@ -537,6 +539,9 @@ impl SimpleComponent for AppController {
             }
             AppInput::OpenAbout => {
                 about_dialog::present(self.window_for_dialogs.upcast_ref());
+            }
+            AppInput::OpenSignalPath => {
+                signal_path_window::present(self.window_for_dialogs.upcast_ref(), &self.model);
             }
             AppInput::OpenDiagnostics => {
                 let snap = match self.engine.as_ref() {

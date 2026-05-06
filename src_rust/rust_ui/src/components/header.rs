@@ -32,6 +32,7 @@ pub enum HeaderOutput {
     OpenSettings,
     OpenAbout,
     OpenDiagnostics,
+    OpenSignalPath,
     BackPressed,
 }
 
@@ -198,6 +199,20 @@ fn build_settings_popover(sender: ComponentSender<HeaderModel>) -> gtk::Popover 
         .build();
     lb.append(&diag_row);
 
+    let path_row = gtk::ListBoxRow::builder()
+        .child(
+            &Label::builder()
+                .label("Signal Path")
+                .xalign(0.0)
+                .margin_top(6)
+                .margin_bottom(6)
+                .margin_start(12)
+                .margin_end(12)
+                .build(),
+        )
+        .build();
+    lb.append(&path_row);
+
     let pop_clone = pop.clone();
     let sender_clone = sender.clone();
     lb.connect_row_activated(move |_, row| {
@@ -208,6 +223,8 @@ fn build_settings_popover(sender: ComponentSender<HeaderModel>) -> gtk::Popover 
             let _ = sender_clone.output(HeaderOutput::OpenAbout);
         } else if row == &diag_row {
             let _ = sender_clone.output(HeaderOutput::OpenDiagnostics);
+        } else if row == &path_row {
+            let _ = sender_clone.output(HeaderOutput::OpenSignalPath);
         }
     });
 

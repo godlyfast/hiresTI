@@ -37,6 +37,7 @@ pub enum AppInput {
     OpenSettings,
     OpenAbout,
     OpenDiagnostics,
+    OpenSignalPath,
 
     // ---- Mini player outputs ---------------------------------------
     TransportPlay,
