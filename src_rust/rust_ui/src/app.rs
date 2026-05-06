@@ -37,6 +37,9 @@ use crate::components::header::{HeaderInput, HeaderModel, HeaderOutput};
 use crate::components::login_dialog::{
     LoginDialogInput, LoginDialogModel, LoginDialogOutput,
 };
+use crate::components::pkce_login_dialog::{
+    PkceLoginDialogInput, PkceLoginDialogModel, PkceLoginDialogOutput,
+};
 use crate::components::mini_player::{MiniPlayerInput, MiniPlayerModel, MiniPlayerOutput};
 use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
 use crate::components::views::album_detail::{AlbumDetailInit, AlbumDetailViewModel};
@@ -81,6 +84,7 @@ pub struct AppController {
     #[allow(dead_code)]
     mini: Controller<MiniPlayerModel>,
     login: Controller<LoginDialogModel>,
+    pkce_login: Controller<PkceLoginDialogModel>,
 
     // Library views (Phase 5). Each owns its own data fetch; the
     // parent dispatches Refresh on first navigation.
@@ -320,10 +324,20 @@ impl SimpleComponent for AppController {
                 LoginDialogOutput::Cancelled => AppInput::AuthDeviceCancelled,
                 LoginDialogOutput::OpenInBrowser(url) => AppInput::OpenBrowser(url),
                 LoginDialogOutput::CopyCode(code) => AppInput::CopyToClipboard(code),
+                LoginDialogOutput::UsePkce => AppInput::StartPkceLogin,
             },
         );
-        // Login dialog needs a parent for modality.
         login.widget().set_transient_for(Some(&root));
+
+        let pkce_login = PkceLoginDialogModel::builder().launch(()).forward(
+            sender.input_sender(),
+            |out| match out {
+                PkceLoginDialogOutput::Cancelled => AppInput::PkceCancelled,
+                PkceLoginDialogOutput::OpenInBrowser(url) => AppInput::OpenBrowser(url),
+                PkceLoginDialogOutput::Submit(url) => AppInput::PkceSubmit(url),
+            },
+        );
+        pkce_login.widget().set_transient_for(Some(&root));
 
         // ---- Layout ---------------------------------------------------
         let toolbar = ToolbarView::new();
@@ -450,6 +464,7 @@ impl SimpleComponent for AppController {
             content,
             mini,
             login,
+            pkce_login,
             albums_view,
             tracks_view,
             artists_view,
@@ -700,6 +715,83 @@ impl SimpleComponent for AppController {
             AppInput::AuthDeviceCancelled => {
                 self.poll_cancelled.store(true, Ordering::SeqCst);
                 self.login.sender().send(LoginDialogInput::Hide).ok();
+            }
+            AppInput::StartPkceLogin => {
+                // Hide the device-code dialog and start the PKCE flow.
+                self.poll_cancelled.store(true, Ordering::SeqCst);
+                self.login.sender().send(LoginDialogInput::Hide).ok();
+                let svc = self.session.clone();
+                let sender_in = sender.input_sender().clone();
+                spawn_blocking(
+                    move || svc.pkce_login_url_blocking(),
+                    move |result| {
+                        let msg = match result {
+                            Ok(url) => AppInput::PkceUrlReady(url),
+                            Err(e) => AppInput::PkceUrlFailed(e.to_string()),
+                        };
+                        let _ = sender_in.send(msg);
+                    },
+                );
+            }
+            AppInput::PkceUrlReady(url) => {
+                self.pkce_login
+                    .sender()
+                    .send(PkceLoginDialogInput::Show(url))
+                    .ok();
+            }
+            AppInput::PkceUrlFailed(err) => {
+                tracing::warn!(error = %err, "pkce_login_url failed");
+                self.model.auth.last_error = Some(err);
+                self.model.auth.status = AuthStatus::LoggedOut;
+            }
+            AppInput::PkceSubmit(url) => {
+                self.pkce_login
+                    .sender()
+                    .send(PkceLoginDialogInput::SetBusy(true))
+                    .ok();
+                let svc = self.session.clone();
+                let svc_for_profile = self.session.clone();
+                let sender_in = sender.input_sender().clone();
+                spawn_blocking(
+                    move || svc.pkce_finish_blocking(&url),
+                    move |result| {
+                        let msg = match result {
+                            Ok(info) => {
+                                let mut profile = UserProfile::from_user_info(&info);
+                                if let Ok(json) =
+                                    svc_for_profile.fetch_profile_blocking(info.user_id)
+                                {
+                                    fill_profile_from_json(&mut profile, &json);
+                                }
+                                AppInput::PkceCompleted(profile)
+                            }
+                            Err(e) => AppInput::PkceFailed(e.to_string()),
+                        };
+                        let _ = sender_in.send(msg);
+                    },
+                );
+            }
+            AppInput::PkceCancelled => {
+                self.pkce_login.sender().send(PkceLoginDialogInput::Hide).ok();
+            }
+            AppInput::PkceCompleted(profile) => {
+                self.pkce_login.sender().send(PkceLoginDialogInput::Hide).ok();
+                if let Err(e) = self.session.save_persisted() {
+                    tracing::warn!(error = %e, "failed to persist token after PKCE login");
+                }
+                self.apply_auth_result(Some(profile));
+                self.dispatch_view_refresh(self.model.current_nav);
+            }
+            AppInput::PkceFailed(err) => {
+                tracing::warn!(error = %err, "PKCE finish failed");
+                self.pkce_login
+                    .sender()
+                    .send(PkceLoginDialogInput::SetBusy(false))
+                    .ok();
+                self.pkce_login
+                    .sender()
+                    .send(PkceLoginDialogInput::SetStatus(format!("Failed: {err}")))
+                    .ok();
             }
             AppInput::OpenBrowser(url) => {
                 if let Err(e) = open_in_browser(&url) {

@@ -13,6 +13,7 @@ pub mod dsp_preset_dialog;
 pub mod header;
 pub mod login_dialog;
 pub mod mini_player;
+pub mod pkce_login_dialog;
 pub mod settings_dialog;
 pub mod sidebar;
 pub mod signal_path_window;

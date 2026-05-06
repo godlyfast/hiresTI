@@ -74,6 +74,19 @@ pub enum AppInput {
     /// pending poll loop.
     AuthDeviceCancelled,
 
+    /// User picked "Use browser sign-in" from the device-code dialog;
+    /// parent fetches the authorize URL on a worker thread.
+    StartPkceLogin,
+    /// pkce_login_url worker came back; show the URL in the PKCE
+    /// dialog.
+    PkceUrlReady(String),
+    PkceUrlFailed(String),
+    /// User pasted a redirect URL — kick pkce_finish on a worker.
+    PkceSubmit(String),
+    PkceCancelled,
+    PkceCompleted(crate::state::auth::UserProfile),
+    PkceFailed(String),
+
     /// Open `url` in the user's default browser (xdg-open).
     OpenBrowser(String),
 

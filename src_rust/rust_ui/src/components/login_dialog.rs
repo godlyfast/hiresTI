@@ -42,6 +42,9 @@ pub enum LoginDialogOutput {
     /// User pressed "Copy Code" — parent should put `code` on the
     /// clipboard. Same separation reason.
     CopyCode(String),
+    /// User picked "Use browser sign-in (PKCE)" — parent kicks the
+    /// PKCE login dialog flow.
+    UsePkce,
 }
 
 pub struct LoginDialogWidgets {
@@ -152,12 +155,27 @@ impl SimpleComponent for LoginDialogModel {
             .build();
         body.append(&status_label);
 
-        let cancel_btn = Button::builder().label("Cancel").halign(gtk::Align::End).build();
+        let action_row = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(8)
+            .halign(gtk::Align::End)
+            .build();
+        let pkce_btn = Button::builder()
+            .label("Use browser sign-in")
+            .css_classes(["flat"])
+            .build();
+        let s = sender.clone();
+        pkce_btn.connect_clicked(move |_| {
+            let _ = s.output(LoginDialogOutput::UsePkce);
+        });
+        action_row.append(&pkce_btn);
+        let cancel_btn = Button::builder().label("Cancel").build();
         let s = sender.clone();
         cancel_btn.connect_clicked(move |_| {
             let _ = s.output(LoginDialogOutput::Cancelled);
         });
-        body.append(&cancel_btn);
+        action_row.append(&cancel_btn);
+        body.append(&action_row);
 
         // Same on close-via-window-X.
         let s = sender.clone();

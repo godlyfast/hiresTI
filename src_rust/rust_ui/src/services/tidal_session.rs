@@ -163,6 +163,22 @@ impl TidalSessionService {
         self.session.oauth_device_poll()
     }
 
+    /// Compute the PKCE authorize URL. Browser-flow alternative to the
+    /// device-code OAuth: the user opens the URL, signs in, lands on a
+    /// redirect page, copies that URL back, and we hand it to
+    /// `pkce_finish_blocking`.
+    pub fn pkce_login_url_blocking(&self) -> Result<String, RtcError> {
+        self.session.pkce_login_url()
+    }
+
+    /// Complete the PKCE flow with the redirect URL the user pasted.
+    /// The Session handles code extraction + token exchange; on
+    /// success it stages the token, validates against /v1/sessions,
+    /// and returns `UserInfo` matching the device-code path.
+    pub fn pkce_finish_blocking(&self, redirect_url: &str) -> Result<UserInfo, RtcError> {
+        self.session.pkce_finish(redirect_url)
+    }
+
     // ---- Paginated favorites listings -----------------------------
     //
     // Each helper drains pages until the server reports the full count,
