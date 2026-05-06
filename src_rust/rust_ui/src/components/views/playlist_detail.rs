@@ -260,6 +260,7 @@ impl SimpleComponent for PlaylistDetailViewModel {
 
         let list = ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
+            .activate_on_single_click(true)
             .css_classes(["track-list"])
             .build();
         for (idx, track) in self.tracks.iter().enumerate() {

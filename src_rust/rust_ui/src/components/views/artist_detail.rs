@@ -329,6 +329,7 @@ impl SimpleComponent for ArtistDetailViewModel {
             widgets.body.append(&section_label("Top Tracks"));
             let list = ListBox::builder()
                 .selection_mode(gtk::SelectionMode::None)
+                .activate_on_single_click(true)
                 .css_classes(["track-list"])
                 .build();
             for (idx, track) in self.top_tracks.iter().enumerate() {

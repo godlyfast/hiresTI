@@ -56,6 +56,7 @@ impl SimpleComponent for TracksViewModel {
     ) -> ComponentParts<Self> {
         let list = ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
+            .activate_on_single_click(true)
             .css_classes(["track-list"])
             .build();
         root.set_child(Some(&list));
