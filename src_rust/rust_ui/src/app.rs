@@ -68,6 +68,9 @@ use crate::model::AppModel;
 use crate::services::alsa_reserve::{self, AlsaReserveService};
 use crate::services::lyrics::{LyricsService, ParsedLyrics};
 use crate::services::mpris::{self, MprisHandle, MprisMetadata, MprisTransport};
+use crate::services::remote_api::{
+    self, RemoteConfig, RemoteHandle, RemoteServerHandle, RemoteSnapshot, RemoteTrack,
+};
 use crate::services::scrobbler::{ScrobbleTrack, ScrobblerConfig, ScrobblerService};
 use crate::services::tidal_session::{spawn_blocking, ResolvedPlayback, TidalSessionService};
 use crate::services::tray::{self, TrayHandle};
@@ -181,6 +184,12 @@ pub struct AppController {
     /// when the dedicated thread couldn't start (rare — unbounded
     /// channel + thread spawn).
     alsa_reserve: Option<AlsaReserveService>,
+
+    /// Remote-control HTTP/JSON-RPC service. Always-allocated handle
+    /// so update_view can keep the snapshot fresh; the actual server
+    /// thread is held in `remote_server` only when enabled.
+    remote_handle: RemoteHandle,
+    remote_server: Option<RemoteServerHandle>,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -518,6 +527,17 @@ impl SimpleComponent for AppController {
         let scrobbler = ScrobblerService::new();
         scrobbler.configure(scrobbler_config_from(&init.settings));
 
+        // ---- Remote-control HTTP server -------------------------------
+        // Snapshot handle is always alive; the server thread is only
+        // started when settings.remote_api_enabled is on. ApplySettings
+        // re-evaluates the flag on every change.
+        let remote_handle = RemoteHandle::new();
+        let remote_server = maybe_start_remote_server(
+            &remote_handle,
+            &init.settings,
+            sender.input_sender().clone(),
+        );
+
         // ---- ALSA reservation -----------------------------------------
         // The service start is cheap (just a thread + unbounded
         // channel); actual D-Bus traffic only happens on `acquire`.
@@ -602,6 +622,8 @@ impl SimpleComponent for AppController {
             current_lyrics: None,
             current_lyric_idx: None,
             alsa_reserve,
+            remote_handle,
+            remote_server,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -642,6 +664,15 @@ impl SimpleComponent for AppController {
                 // updated config.
                 self.scrobbler
                     .configure(scrobbler_config_from(&self.model.settings));
+                // Restart the remote-API server if the on/port/token
+                // shape changed. Cheap when off — the helper short-
+                // circuits when remote_api_enabled is false.
+                self.remote_server = None;
+                self.remote_server = maybe_start_remote_server(
+                    &self.remote_handle,
+                    &self.model.settings,
+                    sender.input_sender().clone(),
+                );
                 // Live-apply driver/device deltas to the engine so the
                 // user doesn't have to restart for output changes.
                 // Other audio settings (latency, mmap rt, exclusive)
@@ -1131,6 +1162,7 @@ impl SimpleComponent for AppController {
         if let Some(t) = self.tray.as_ref() {
             t.set_is_playing(is_playing);
         }
+        self.refresh_remote_snapshot(is_playing);
     }
 }
 
@@ -1175,6 +1207,49 @@ impl AppController {
             duration_seconds,
             art_path,
         }
+    }
+
+    /// Recompute the remote-control snapshot. Cheap (mutex-protected
+    /// shallow clone of state); called from update_view so the JSON
+    /// returned by the HTTP thread always reflects the GTK side.
+    fn refresh_remote_snapshot(&self, is_playing: bool) {
+        let logged_in = self.model.auth.is_logged_in();
+        let position_seconds = self.model.playback.position.as_secs_f64();
+        let duration_seconds = self.model.playback.duration.as_secs_f64();
+        let current_track = self
+            .model
+            .playback
+            .current_track
+            .as_ref()
+            .map(remote_track_from);
+        let queue = self
+            .model
+            .queue
+            .tracks
+            .iter()
+            .map(remote_track_from)
+            .collect::<Vec<_>>();
+        let current_index = self.model.queue.current_index;
+        let volume_percent = self
+            .model
+            .settings
+            .extra
+            .get("volume")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as u32;
+        self.remote_handle.update(|s| {
+            *s = RemoteSnapshot {
+                logged_in,
+                is_playing,
+                is_paused: matches!(self.model.playback.transport, TransportState::Paused),
+                position_seconds,
+                duration_seconds,
+                current_track,
+                queue,
+                current_index,
+                volume_percent,
+            };
+        });
     }
 
     /// Push transport + can-* flags to MPRIS in one shot. Called from
@@ -1764,6 +1839,73 @@ fn alsa_reserve_card_for(s: &Settings) -> Option<u32> {
     }
     let device = settings_str(s, "device").unwrap_or_default();
     parse_hw_card(&device)
+}
+
+/// Build the remote-control config from `settings.extra` + decide
+/// whether to start (or restart) the listener thread.
+fn remote_config_from(s: &Settings) -> RemoteConfig {
+    let port_raw = s.extra.get("remote_api_port").and_then(|v| v.as_u64()).unwrap_or(0);
+    RemoteConfig {
+        enabled: settings_bool(s, "remote_api_enabled"),
+        port: if (1..=65_535).contains(&port_raw) {
+            port_raw as u16
+        } else {
+            8765
+        },
+        token: settings_str(s, "remote_api_token").unwrap_or_default(),
+        allowed_cidrs: s
+            .extra
+            .get("remote_api_allowed_cidrs")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn maybe_start_remote_server(
+    handle: &RemoteHandle,
+    settings: &Settings,
+    sender: relm4::Sender<AppInput>,
+) -> Option<RemoteServerHandle> {
+    let cfg = remote_config_from(settings);
+    if !cfg.enabled {
+        return None;
+    }
+    match remote_api::start(handle.clone(), sender, cfg) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::info!(error = %e, "remote-api: failed to start (port busy?)");
+            None
+        }
+    }
+}
+
+fn remote_track_from(t: &rust_tidal_core::api::Track) -> RemoteTrack {
+    let artist = crate::components::views::common::track_artist_name(t);
+    let album_name = t
+        .album
+        .as_ref()
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+    let cover = t
+        .album
+        .as_ref()
+        .and_then(|a| a.cover.clone())
+        .unwrap_or_default();
+    RemoteTrack {
+        id: t.id,
+        title: t.name.clone(),
+        artist,
+        album: album_name,
+        duration_seconds: t.duration.max(0) as u32,
+        artist_id: t.artist.as_ref().map(|a| a.id).unwrap_or(0),
+        album_id: t.album.as_ref().map(|a| a.id).unwrap_or(0),
+        cover,
+    }
 }
 
 /// `hw:2` / `hw:2,0` / `hw:CARD=foo` → 2 / 2 / None.

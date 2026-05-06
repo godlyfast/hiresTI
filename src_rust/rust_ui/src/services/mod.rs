@@ -10,6 +10,7 @@ pub mod covers;
 pub mod dsp_preset;
 pub mod lyrics;
 pub mod mpris;
+pub mod remote_api;
 pub mod scrobbler;
 pub mod tidal_session;
 pub mod tray;

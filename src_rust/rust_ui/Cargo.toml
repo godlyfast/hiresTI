@@ -55,3 +55,8 @@ md-5 = "0.10"
 # declaring it here keeps the import path stable independent of
 # mpris-server's re-export shape.
 zbus = { version = "5", default-features = false, features = ["async-io"] }
+
+# Remote-control HTTP/JSON-RPC server. tiny_http is blocking + tiny;
+# we run it on a dedicated thread so the GTK loop never sees a
+# socket call.
+tiny_http = "0.12"
