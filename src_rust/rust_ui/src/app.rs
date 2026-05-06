@@ -59,6 +59,7 @@ use crate::components::views::tracks::{TracksViewInput, TracksViewModel};
 use crate::messages::{AppInput, AuthPollOutcome, NavTarget};
 use crate::model::AppModel;
 use crate::services::tidal_session::{spawn_blocking, ResolvedPlayback, TidalSessionService};
+use crate::services::tray::{self, TrayHandle};
 use crate::state::playback::TransportState;
 use rust_audio_core::Engine;
 use crate::settings::Settings;
@@ -122,6 +123,11 @@ pub struct AppController {
     /// Settings, etc.) can parent themselves modally without each
     /// click going through update_view.
     window_for_dialogs: ApplicationWindow,
+
+    /// System tray. None when ksni init failed (missing D-Bus session,
+    /// most likely on minimal CI environments). `Drop` on the handle
+    /// shuts down the tray thread.
+    tray: Option<TrayHandle>,
 }
 
 /// Variants of the global detail surface. Each holds the active
@@ -401,6 +407,33 @@ impl SimpleComponent for AppController {
             glib::ControlFlow::Continue
         });
 
+        // ---- System tray ----------------------------------------------
+        // Tray runs on its own thread inside ksni; menu actions are
+        // delivered back to the GTK main loop through the input
+        // sender.
+        let tray = match tray::start(sender.input_sender().clone()) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::info!(error = %e, "tray icon unavailable; running without tray");
+                None
+            }
+        };
+
+        // Window close → hide-to-tray when tray is up; otherwise
+        // standard quit behavior. The user can always exit via
+        // tray "Quit" or by re-running and quitting properly.
+        let tray_present = tray.is_some();
+        let s = sender.clone();
+        root.connect_close_request(move |w| {
+            if tray_present {
+                w.set_visible(false);
+                glib::Propagation::Stop
+            } else {
+                let _ = s.input_sender().send(AppInput::TrayQuit);
+                glib::Propagation::Proceed
+            }
+        });
+
         // ---- Cold-start auth restore ----------------------------------
         // If a token file exists, kick off load_token + check_login on a
         // worker thread. We don't block init() because /v1/sessions can
@@ -434,6 +467,7 @@ impl SimpleComponent for AppController {
             play_request_counter: 0,
             engine,
             window_for_dialogs: root.clone(),
+            tray,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -739,6 +773,21 @@ impl SimpleComponent for AppController {
             AppInput::PlaybackTick => {
                 self.tick_playback_position();
             }
+            AppInput::TrayShow => {
+                let win = &self.window_for_dialogs;
+                win.set_visible(true);
+                win.present();
+            }
+            AppInput::TrayQuit => {
+                // Drop the tray (shutdown thread) then close all
+                // top-level windows so the GTK main loop exits.
+                self.tray = None;
+                if let Some(app) = self.window_for_dialogs.application() {
+                    app.quit();
+                } else {
+                    self.window_for_dialogs.close();
+                }
+            }
             AppInput::NowPlayingCoverReady { request_id, path } => {
                 if request_id != self.play_request_counter {
                     return;
@@ -772,6 +821,9 @@ impl SimpleComponent for AppController {
             .sender()
             .send(MiniPlayerInput::SetIsPlaying(is_playing))
             .ok();
+        if let Some(t) = self.tray.as_ref() {
+            t.set_is_playing(is_playing);
+        }
     }
 }
 

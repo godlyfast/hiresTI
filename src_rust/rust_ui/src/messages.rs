@@ -125,6 +125,13 @@ pub enum AppInput {
         request_id: u64,
         path: std::path::PathBuf,
     },
+
+    // ---- Tray (Phase 8-J) ------------------------------------------
+    /// Tray "Show window" / left-click: present + raise the main
+    /// window, unhiding it if it had been minimized to tray.
+    TrayShow,
+    /// Tray "Quit" — fully exit the application.
+    TrayQuit,
 }
 
 #[derive(Debug, Clone)]

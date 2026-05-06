@@ -31,3 +31,8 @@ rust_audio_core = { path = "../rust_audio_core" }
 # Cover-art downloader. Same client shape rust_tidal_core uses, kept
 # in the UI crate since covers are a UI-layer concern.
 ureq = { version = "2", features = ["tls"], default-features = false }
+
+# Linux system tray. KDE/freedesktop StatusNotifierItem via D-Bus —
+# works on both X11 and Wayland. Use the blocking API so the dedicated
+# tray thread doesn't pull a tokio runtime into the UI process.
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
