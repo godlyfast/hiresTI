@@ -71,22 +71,16 @@ impl SimpleComponent for HeaderModel {
         });
         root.pack_start(&back_btn);
 
-        let title = GtkBox::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .build();
-        let app_label = Label::builder()
-            .label("HiresTI")
-            .css_classes(["heading"])
-            .build();
-        title.append(&app_label);
-        root.set_title_widget(Some(&title));
-
-        // Center: search entry. PhASe 3 just emits typed-in queries;
-        // dispatch / completion / history popover lands later.
+        // Search entry as the centered title widget. HeaderBar centers
+        // whatever you set as the title widget, so the search box
+        // floats in the middle of the bar regardless of how many
+        // pack_start / pack_end children flank it. The "HiresTI" app
+        // label is dropped — the window title bar already shows the
+        // distro-themed window title and the duplicate label was just
+        // taking up center space.
         let search = Entry::builder()
             .placeholder_text("Search…")
-            .width_request(360)
+            .width_request(420)
             .build();
         let s = sender.clone();
         search.connect_activate(move |entry| {
@@ -95,7 +89,7 @@ impl SimpleComponent for HeaderModel {
                 let _ = s.output(HeaderOutput::Search(q));
             }
         });
-        root.pack_start(&search);
+        root.set_title_widget(Some(&search));
 
         // Right: settings menu, then login button at the very end.
         let settings_btn = MenuButton::builder()

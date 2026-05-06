@@ -61,14 +61,17 @@ impl SimpleComponent for MiniPlayerModel {
     type Widgets = MiniPlayerWidgets;
 
     fn init_root() -> Self::Root {
+        // `card-bar` picks up the Python-build card chrome (rounded
+        // corners, headerbar bg, hairline border) from the bundled
+        // stylesheet; `mini-player` keeps the per-component hooks.
         GtkBox::builder()
             .orientation(Orientation::Horizontal)
-            .spacing(12)
+            .spacing(14)
             .margin_top(8)
             .margin_bottom(8)
             .margin_start(12)
             .margin_end(12)
-            .css_classes(["mini-player"])
+            .css_classes(["card-bar", "mini-player"])
             .build()
     }
 
@@ -80,7 +83,7 @@ impl SimpleComponent for MiniPlayerModel {
         // Cover art slot. Real artwork loading wires in Phase 7.
         let cover = Image::builder()
             .icon_name("audio-x-generic-symbolic")
-            .pixel_size(48)
+            .pixel_size(64)
             .css_classes(["mini-player-cover"])
             .build();
         root.append(&cover);

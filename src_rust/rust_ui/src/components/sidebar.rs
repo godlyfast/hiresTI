@@ -3,7 +3,9 @@
 //! emit `SidebarOutput::Navigate(target)` which the root forwards into
 //! `AppInput::NavigateTo`.
 
-use relm4::gtk::{self, prelude::*, Box as GtkBox, Label, ListBox, ListBoxRow, Orientation};
+use relm4::gtk::{
+    self, prelude::*, Box as GtkBox, Image, Label, ListBox, ListBoxRow, Orientation,
+};
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
 use crate::messages::{NavSection, NavTarget};
@@ -120,19 +122,51 @@ impl SimpleComponent for SidebarModel {
     }
 }
 
+/// Symbolic Adwaita icon for each nav target. Symbolic variants
+/// recolor with the theme so they look right in both light + dark.
+fn icon_for(target: NavTarget) -> &'static str {
+    match target {
+        NavTarget::Home => "go-home-symbolic",
+        NavTarget::New => "starred-symbolic",
+        NavTarget::Top => "view-pin-symbolic",
+        NavTarget::HiRes => "audio-headphones-symbolic",
+        NavTarget::Genres => "applications-multimedia-symbolic",
+        NavTarget::Decades => "office-calendar-symbolic",
+        NavTarget::Moods => "face-smile-symbolic",
+        NavTarget::Albums => "media-optical-symbolic",
+        NavTarget::Tracks => "audio-x-generic-symbolic",
+        NavTarget::Artists => "system-users-symbolic",
+        NavTarget::Playlists => "view-list-symbolic",
+        NavTarget::MixesAndRadio => "media-playlist-shuffle-symbolic",
+        NavTarget::History => "document-open-recent-symbolic",
+    }
+}
+
 /// Build a single sidebar row. The row carries its `NavTarget` as a
 /// glib data key so the row-activated handler can recover it without
 /// per-row closures (which would require boxing the sender per row).
 fn build_row(target: NavTarget) -> ListBoxRow {
-    let label = Label::builder()
-        .label(target.label())
-        .xalign(0.0)
+    let body = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(10)
         .margin_top(6)
         .margin_bottom(6)
         .margin_start(12)
+        .margin_end(8)
         .build();
+    let icon = Image::builder()
+        .icon_name(icon_for(target))
+        .pixel_size(16)
+        .build();
+    body.append(&icon);
+    let label = Label::builder()
+        .label(target.label())
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    body.append(&label);
     let row = ListBoxRow::builder()
-        .child(&label)
+        .child(&body)
         .css_classes(["sidebar-row"])
         .build();
     // Tag the row with its target id so row_target() can read it back.

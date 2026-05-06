@@ -196,10 +196,13 @@ impl TidalSessionService {
         drain_pages(|args| self.session.list_favorite_tracks(args))
     }
     pub fn list_favorite_mixes_blocking(&self) -> Result<Vec<Mix>, RtcError> {
-        drain_pages(|args| self.session.list_favorite_mixes(args))
+        // v2 endpoint — same 50-item cap as my-collection/playlists/folders.
+        drain_pages_with_size(V2_PAGE_SIZE, |args| self.session.list_favorite_mixes(args))
     }
     pub fn list_user_playlists_blocking(&self) -> Result<Vec<Playlist>, RtcError> {
-        drain_pages(|args| self.session.list_user_playlists("root", args))
+        drain_pages_with_size(V2_PAGE_SIZE, |args| {
+            self.session.list_user_playlists("root", args)
+        })
     }
 
     // ---- Detail surfaces (Phase 7) ---------------------------------
@@ -440,8 +443,18 @@ impl TidalSessionService {
 /// 200 items per page; TIDAL clamps to its own internal max (1000 for
 /// most endpoints) so even huge collections come down in 5-10 calls.
 const PAGE_SIZE: i32 = 200;
+/// `my-collection/*` v2 endpoints reject `limit > 50` with a 400.
+/// The legacy `/v1/users/.../favorites/*` endpoints accept up to 1000.
+const V2_PAGE_SIZE: i32 = 50;
 
-fn drain_pages<T, F>(mut fetch: F) -> Result<Vec<T>, RtcError>
+fn drain_pages<T, F>(fetch: F) -> Result<Vec<T>, RtcError>
+where
+    F: FnMut(&ListArgs) -> Result<rust_tidal_core::api::PageResponse<T>, RtcError>,
+{
+    drain_pages_with_size(PAGE_SIZE, fetch)
+}
+
+fn drain_pages_with_size<T, F>(page_size: i32, mut fetch: F) -> Result<Vec<T>, RtcError>
 where
     F: FnMut(&ListArgs) -> Result<rust_tidal_core::api::PageResponse<T>, RtcError>,
 {
@@ -449,7 +462,7 @@ where
     let mut offset: i32 = 0;
     loop {
         let args = ListArgs {
-            limit: PAGE_SIZE,
+            limit: page_size,
             offset,
             order: None,
             order_direction: None,
@@ -457,7 +470,7 @@ where
         let page = fetch(&args)?;
         let n = page.items.len() as i32;
         out.extend(page.items);
-        if n < PAGE_SIZE || (page.total_number_of_items > 0 && out.len() as i32 >= page.total_number_of_items) {
+        if n < page_size || (page.total_number_of_items > 0 && out.len() as i32 >= page.total_number_of_items) {
             break;
         }
         offset += n;
