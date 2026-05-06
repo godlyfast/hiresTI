@@ -10,13 +10,19 @@ use relm4::gtk::{
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use rust_tidal_core::api::Album;
 
 use crate::components::views::common::{
-    build_empty_widget, build_error_widget, build_loading_widget, LibraryViewOutput,
+    build_empty_widget, build_error_widget, build_loading_widget, CoverPaths, LibraryViewOutput,
     ViewLoadState,
 };
+use crate::services::covers::fetch_covers_batch_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+const COVER_SIZE: u32 = 160;
 
 pub struct AlbumsViewModel {
     session: TidalSessionService,
@@ -25,6 +31,7 @@ pub struct AlbumsViewModel {
     /// Bumped on every Refresh so a stale in-flight fetch can recognize
     /// it should drop its result instead of clobbering newer state.
     fetch_token: u64,
+    covers: CoverPaths,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +44,9 @@ pub enum AlbumsViewInput {
     FetchResult { token: u64, items: Vec<Album> },
     /// Worker thread reports failure with the error string.
     FetchFailed { token: u64, error: String },
+    /// Cover-art batch finished; mostly cosmetic — the next render
+    /// picks up the cached paths.
+    CoversBatch { token: u64, covers: HashMap<String, PathBuf> },
     /// User clicked an album card. The parent forwards this as a
     /// detail-view nav.
     Open(String, String),
@@ -94,6 +104,7 @@ impl SimpleComponent for AlbumsViewModel {
             items: Vec::new(),
             state: ViewLoadState::Idle,
             fetch_token: 0,
+            covers: HashMap::new(),
         };
         let widgets = AlbumsViewWidgets {
             root: root.clone(),
@@ -132,8 +143,33 @@ impl SimpleComponent for AlbumsViewModel {
                     return;
                 }
                 tracing::info!(count = items.len(), "albums loaded");
+                let cover_ids: Vec<String> = items
+                    .iter()
+                    .filter_map(|a| a.cover.clone())
+                    .filter(|id| !self.covers.contains_key(id))
+                    .collect();
                 self.items = items;
                 self.state = ViewLoadState::Loaded;
+                if !cover_ids.is_empty() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_covers_batch_blocking(cover_ids, COVER_SIZE),
+                        move |covers| {
+                            let _ = sender_in.send(AlbumsViewInput::CoversBatch {
+                                token: cover_token,
+                                covers,
+                            });
+                        },
+                    );
+                }
+            }
+            AlbumsViewInput::CoversBatch { token, covers } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                tracing::info!(count = covers.len(), "album covers batch loaded");
+                self.covers.extend(covers);
             }
             AlbumsViewInput::FetchFailed { token, error } => {
                 if token != self.fetch_token {
@@ -172,7 +208,11 @@ impl SimpleComponent for AlbumsViewModel {
                     )));
                 } else {
                     for album in &self.items {
-                        let card = build_album_card(album, sender.clone());
+                        let cover_path = album
+                            .cover
+                            .as_deref()
+                            .and_then(|id| self.covers.get(id).cloned());
+                        let card = build_album_card(album, cover_path, sender.clone());
                         let child = FlowBoxChild::builder().child(&card).build();
                         widgets.flow.append(&child);
                     }
@@ -191,20 +231,25 @@ fn clear_flowbox(flow: &FlowBox) {
     }
 }
 
-fn build_album_card(album: &Album, sender: ComponentSender<AlbumsViewModel>) -> GtkBox {
+fn build_album_card(
+    album: &Album,
+    cover_path: Option<PathBuf>,
+    sender: ComponentSender<AlbumsViewModel>,
+) -> GtkBox {
     let card = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(4)
         .css_classes(["album-card"])
         .build();
 
-    // Cover slot. Phase 7 swaps the placeholder icon for a downloaded
-    // resources.tidal.com cover via the existing cache pattern.
     let cover = Image::builder()
         .icon_name("audio-x-generic-symbolic")
         .pixel_size(160)
         .css_classes(["album-cover-img"])
         .build();
+    if let Some(p) = cover_path {
+        cover.set_from_file(Some(&p));
+    }
     card.append(&cover);
 
     let title = if album.name.is_empty() {

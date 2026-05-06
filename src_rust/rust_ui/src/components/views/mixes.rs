@@ -8,19 +8,26 @@ use relm4::gtk::{
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use rust_tidal_core::api::Mix;
 
 use crate::components::views::common::{
-    build_empty_widget, build_error_widget, build_loading_widget, LibraryViewOutput,
+    build_empty_widget, build_error_widget, build_loading_widget, CoverPaths, LibraryViewOutput,
     ViewLoadState,
 };
+use crate::services::covers::fetch_covers_batch_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+const COVER_SIZE: u32 = 160;
 
 pub struct MixesViewModel {
     session: TidalSessionService,
     items: Vec<Mix>,
     state: ViewLoadState,
     fetch_token: u64,
+    covers: CoverPaths,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +35,7 @@ pub enum MixesViewInput {
     Refresh,
     FetchResult { token: u64, items: Vec<Mix> },
     FetchFailed { token: u64, error: String },
+    CoversBatch { token: u64, covers: HashMap<String, PathBuf> },
     Open(String, String),
 }
 
@@ -76,6 +84,7 @@ impl SimpleComponent for MixesViewModel {
                 items: Vec::new(),
                 state: ViewLoadState::Idle,
                 fetch_token: 0,
+                covers: HashMap::new(),
             },
             widgets: MixesViewWidgets {
                 root: root.clone(),
@@ -112,8 +121,32 @@ impl SimpleComponent for MixesViewModel {
                 if token != self.fetch_token {
                     return;
                 }
+                let cover_ids: Vec<String> = items
+                    .iter()
+                    .filter_map(|m| m.image.clone().or_else(|| m.detail_image.clone()))
+                    .filter(|id| !self.covers.contains_key(id))
+                    .collect();
                 self.items = items;
                 self.state = ViewLoadState::Loaded;
+                if !cover_ids.is_empty() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_covers_batch_blocking(cover_ids, COVER_SIZE),
+                        move |covers| {
+                            let _ = sender_in.send(MixesViewInput::CoversBatch {
+                                token: cover_token,
+                                covers,
+                            });
+                        },
+                    );
+                }
+            }
+            MixesViewInput::CoversBatch { token, covers } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                self.covers.extend(covers);
             }
             MixesViewInput::FetchFailed { token, error } => {
                 if token != self.fetch_token {
@@ -140,7 +173,12 @@ impl SimpleComponent for MixesViewModel {
                     )));
                 } else {
                     for mix in &self.items {
-                        let card = build_mix_card(mix, sender.clone());
+                        let path = mix
+                            .image
+                            .as_deref()
+                            .or(mix.detail_image.as_deref())
+                            .and_then(|id| self.covers.get(id).cloned());
+                        let card = build_mix_card(mix, path, sender.clone());
                         let child = FlowBoxChild::builder().child(&card).build();
                         widgets.flow.append(&child);
                     }
@@ -157,7 +195,11 @@ fn clear_flowbox(flow: &FlowBox) {
     }
 }
 
-fn build_mix_card(mix: &Mix, sender: ComponentSender<MixesViewModel>) -> GtkBox {
+fn build_mix_card(
+    mix: &Mix,
+    cover_path: Option<PathBuf>,
+    sender: ComponentSender<MixesViewModel>,
+) -> GtkBox {
     let card = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(4)
@@ -167,6 +209,9 @@ fn build_mix_card(mix: &Mix, sender: ComponentSender<MixesViewModel>) -> GtkBox 
         .icon_name("audio-x-generic-symbolic")
         .pixel_size(160)
         .build();
+    if let Some(p) = cover_path {
+        cover.set_from_file(Some(&p));
+    }
     card.append(&cover);
     let title = Label::builder()
         .label(if mix.title.is_empty() { "Untitled" } else { mix.title.as_str() })

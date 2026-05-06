@@ -27,3 +27,7 @@ tracing-subscriber.workspace = true
 # UI can hand domain values around without re-serializing through JSON.
 rust_tidal_core = { path = "../rust_tidal_core" }
 rust_audio_core = { path = "../rust_audio_core" }
+
+# Cover-art downloader. Same client shape rust_tidal_core uses, kept
+# in the UI crate since covers are a UI-layer concern.
+ureq = { version = "2", features = ["tls"], default-features = false }

@@ -10,13 +10,21 @@ use relm4::gtk::{self, Box as GtkBox, Orientation, ScrolledWindow, Separator};
 use relm4::gtk::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use rust_tidal_core::api::Page;
 
 use crate::components::views::common::{
     build_empty_widget, build_error_widget, build_loading_widget, build_page_category_section,
-    LibraryViewOutput, ViewLoadState,
+    page_item_cover_id, CoverPaths, LibraryViewOutput, ViewLoadState,
 };
+use crate::services::covers::fetch_covers_batch_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+/// Pixel size used for grid cards. Matches the placeholder Image size
+/// so the swap doesn't reflow the layout.
+const COVER_SIZE: u32 = 160;
 
 /// What page this view should fetch. `Home` is the v2 `home/feed/static`
 /// surface; `Path(p)` hits `/pages/<p>` directly.
@@ -40,6 +48,7 @@ pub struct DiscoveryViewModel {
     page: Option<Page>,
     state: ViewLoadState,
     fetch_token: u64,
+    covers: CoverPaths,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +56,8 @@ pub enum DiscoveryViewInput {
     Refresh,
     FetchResult { token: u64, page: Page },
     FetchFailed { token: u64, error: String },
+    /// Background batch finished. Token guards against stale results.
+    CoversBatch { token: u64, covers: HashMap<String, PathBuf> },
     /// Card click from the rendering helpers — forwarded straight to
     /// the parent via the component's Output sender.
     Forward(LibraryViewOutput),
@@ -95,6 +106,7 @@ impl SimpleComponent for DiscoveryViewModel {
             page: None,
             state: ViewLoadState::Idle,
             fetch_token: 0,
+            covers: HashMap::new(),
         };
         let widgets = DiscoveryViewWidgets {
             root: root.clone(),
@@ -141,8 +153,37 @@ impl SimpleComponent for DiscoveryViewModel {
                     title = page.title.as_deref().unwrap_or(""),
                     "discovery page loaded"
                 );
+                // Collect the cover-ids for this page and kick a batch
+                // fetch so update_view's render can swap placeholders
+                // for real images on the next pass.
+                let cover_ids: Vec<String> = page
+                    .categories
+                    .iter()
+                    .flat_map(|c| c.items.iter())
+                    .filter_map(page_item_cover_id)
+                    .collect();
                 self.page = Some(page);
                 self.state = ViewLoadState::Loaded;
+                if !cover_ids.is_empty() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_covers_batch_blocking(cover_ids, COVER_SIZE),
+                        move |covers| {
+                            let _ = sender_in.send(DiscoveryViewInput::CoversBatch {
+                                token: cover_token,
+                                covers,
+                            });
+                        },
+                    );
+                }
+            }
+            DiscoveryViewInput::CoversBatch { token, covers } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                tracing::info!(count = covers.len(), "discovery covers batch loaded");
+                self.covers.extend(covers);
             }
             DiscoveryViewInput::FetchFailed { token, error } => {
                 if token != self.fetch_token {
@@ -190,7 +231,8 @@ impl SimpleComponent for DiscoveryViewModel {
                                 .body
                                 .append(&Separator::new(Orientation::Horizontal));
                         }
-                        let section = build_page_category_section(category, opener.clone());
+                        let section =
+                            build_page_category_section(category, opener.clone(), &self.covers);
                         widgets.body.append(&section);
                     }
                 }

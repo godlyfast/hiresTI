@@ -13,6 +13,7 @@
 //! re-fetch; Refresh wipes the cache and reloads.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use relm4::gtk::prelude::*;
@@ -25,9 +26,12 @@ use rust_tidal_core::api::Page;
 
 use crate::components::views::common::{
     build_empty_widget, build_error_widget, build_loading_widget, build_page_category_section,
-    LibraryViewOutput, ViewLoadState,
+    page_item_cover_id, CoverPaths, LibraryViewOutput, ViewLoadState,
 };
+use crate::services::covers::fetch_covers_batch_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+const COVER_SIZE: u32 = 160;
 
 #[derive(Debug, Clone)]
 pub enum TabSource {
@@ -66,6 +70,9 @@ pub struct TabbedDiscoveryViewModel {
     /// Bumped on every Refresh + every tab switch so a slow tab fetch
     /// can't clobber a fresher selection.
     fetch_token: u64,
+    /// Cover-art lookup shared across all tabs in this view. Filled
+    /// progressively as each tab's batch fetch completes.
+    covers: CoverPaths,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +96,10 @@ pub enum TabbedDiscoveryInput {
         token: u64,
         tab_index: usize,
         error: String,
+    },
+    CoversBatch {
+        token: u64,
+        covers: HashMap<String, PathBuf>,
     },
     Forward(LibraryViewOutput),
 }
@@ -149,6 +160,7 @@ impl SimpleComponent for TabbedDiscoveryViewModel {
             cache: HashMap::new(),
             state: ViewLoadState::Idle,
             fetch_token: 0,
+            covers: HashMap::new(),
         };
         let widgets = TabbedDiscoveryWidgets {
             root: root.clone(),
@@ -270,8 +282,35 @@ impl SimpleComponent for TabbedDiscoveryViewModel {
                     categories = page.categories.len(),
                     "tab content loaded"
                 );
+                let cover_ids: Vec<String> = page
+                    .categories
+                    .iter()
+                    .flat_map(|c| c.items.iter())
+                    .filter_map(page_item_cover_id)
+                    .filter(|id| !self.covers.contains_key(id))
+                    .collect();
                 self.cache.insert(tab_index, page);
                 self.state = ViewLoadState::Loaded;
+                if !cover_ids.is_empty() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_covers_batch_blocking(cover_ids, COVER_SIZE),
+                        move |covers| {
+                            let _ = sender_in.send(TabbedDiscoveryInput::CoversBatch {
+                                token: cover_token,
+                                covers,
+                            });
+                        },
+                    );
+                }
+            }
+            TabbedDiscoveryInput::CoversBatch { token, covers } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                tracing::info!(count = covers.len(), "tabbed covers batch loaded");
+                self.covers.extend(covers);
             }
             TabbedDiscoveryInput::TabContentFailed {
                 token,
@@ -356,7 +395,8 @@ impl SimpleComponent for TabbedDiscoveryViewModel {
                         if i > 0 {
                             body.append(&Separator::new(Orientation::Horizontal));
                         }
-                        let section = build_page_category_section(category, opener.clone());
+                        let section =
+                            build_page_category_section(category, opener.clone(), &self.covers);
                         body.append(&section);
                     }
                 }

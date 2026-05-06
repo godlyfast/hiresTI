@@ -9,13 +9,18 @@ use relm4::gtk::{
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::path::PathBuf;
+
 use rust_tidal_core::api::{Playlist, Track};
 
 use crate::components::views::common::{
     build_error_widget, build_loading_widget, build_track_row, LibraryViewOutput,
     ViewLoadState,
 };
+use crate::services::covers::fetch_cover_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+const HEADER_COVER_SIZE: u32 = 320;
 
 pub struct PlaylistDetailInit {
     pub session: TidalSessionService,
@@ -33,6 +38,7 @@ pub struct PlaylistDetailViewModel {
     fetch_token: u64,
     header_done: bool,
     tracks_done: bool,
+    cover_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +48,7 @@ pub enum PlaylistDetailInput {
     HeaderFailed { token: u64, error: String },
     TracksResult { token: u64, items: Vec<Track> },
     TracksFailed { token: u64, error: String },
+    CoverResult { token: u64, path: PathBuf },
     /// Index into `tracks` — handler emits PlayContext with the playlist
     /// as the queue source.
     Play(usize),
@@ -93,6 +100,7 @@ impl SimpleComponent for PlaylistDetailViewModel {
             fetch_token: 0,
             header_done: false,
             tracks_done: false,
+            cover_path: None,
         };
         let widgets = PlaylistDetailWidgets {
             root: root.clone(),
@@ -153,9 +161,34 @@ impl SimpleComponent for PlaylistDetailViewModel {
                 if token != self.fetch_token {
                     return;
                 }
+                if let Some(cover_id) = playlist
+                    .square_image
+                    .clone()
+                    .or_else(|| playlist.image.clone())
+                {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_cover_blocking(&cover_id, HEADER_COVER_SIZE),
+                        move |result| {
+                            if let Ok(path) = result {
+                                let _ = sender_in.send(PlaylistDetailInput::CoverResult {
+                                    token: cover_token,
+                                    path,
+                                });
+                            }
+                        },
+                    );
+                }
                 self.playlist = Some(playlist);
                 self.header_done = true;
                 self.maybe_finish();
+            }
+            PlaylistDetailInput::CoverResult { token, path } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                self.cover_path = Some(path);
             }
             PlaylistDetailInput::HeaderFailed { token, error } => {
                 if token != self.fetch_token {
@@ -221,6 +254,7 @@ impl SimpleComponent for PlaylistDetailViewModel {
 
         widgets.body.append(&build_header(
             self.playlist.as_ref(),
+            self.cover_path.as_deref(),
             &self.initial_title,
         ));
 
@@ -254,7 +288,11 @@ fn clear_box(b: &GtkBox) {
     }
 }
 
-fn build_header(playlist: Option<&Playlist>, initial_title: &str) -> GtkBox {
+fn build_header(
+    playlist: Option<&Playlist>,
+    cover_path: Option<&std::path::Path>,
+    initial_title: &str,
+) -> GtkBox {
     let header = GtkBox::builder()
         .orientation(Orientation::Horizontal)
         .spacing(20)
@@ -266,6 +304,9 @@ fn build_header(playlist: Option<&Playlist>, initial_title: &str) -> GtkBox {
         .pixel_size(180)
         .css_classes(["album-cover-img"])
         .build();
+    if let Some(p) = cover_path {
+        cover.set_from_file(Some(p));
+    }
     header.append(&cover);
 
     let info = GtkBox::builder()

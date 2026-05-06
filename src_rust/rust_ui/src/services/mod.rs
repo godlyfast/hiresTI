@@ -5,4 +5,5 @@
 //! threading shims the UI needs (blocking HTTP calls dispatched to a
 //! worker thread, etc.).
 
+pub mod covers;
 pub mod tidal_session;

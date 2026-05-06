@@ -8,19 +8,28 @@ use relm4::gtk::{
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use rust_tidal_core::api::Playlist;
 
 use crate::components::views::common::{
-    build_empty_widget, build_error_widget, build_loading_widget, LibraryViewOutput,
+    build_empty_widget, build_error_widget, build_loading_widget, CoverPaths, LibraryViewOutput,
     ViewLoadState,
 };
+use crate::services::covers::fetch_covers_batch_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+/// Smaller cache bucket — playlists render in a vertical list with
+/// ~48px row icons, so 80x80 downscales cleanly.
+const COVER_SIZE: u32 = 80;
 
 pub struct PlaylistsViewModel {
     session: TidalSessionService,
     items: Vec<Playlist>,
     state: ViewLoadState,
     fetch_token: u64,
+    covers: CoverPaths,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +37,7 @@ pub enum PlaylistsViewInput {
     Refresh,
     FetchResult { token: u64, items: Vec<Playlist> },
     FetchFailed { token: u64, error: String },
+    CoversBatch { token: u64, covers: HashMap<String, PathBuf> },
     Open(String, String),
 }
 
@@ -68,6 +78,7 @@ impl SimpleComponent for PlaylistsViewModel {
                 items: Vec::new(),
                 state: ViewLoadState::Idle,
                 fetch_token: 0,
+                covers: HashMap::new(),
             },
             widgets: PlaylistsViewWidgets {
                 root: root.clone(),
@@ -104,8 +115,34 @@ impl SimpleComponent for PlaylistsViewModel {
                 if token != self.fetch_token {
                     return;
                 }
+                let cover_ids: Vec<String> = items
+                    .iter()
+                    .filter_map(|p| {
+                        p.square_image.clone().or_else(|| p.image.clone())
+                    })
+                    .filter(|id| !self.covers.contains_key(id))
+                    .collect();
                 self.items = items;
                 self.state = ViewLoadState::Loaded;
+                if !cover_ids.is_empty() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_covers_batch_blocking(cover_ids, COVER_SIZE),
+                        move |covers| {
+                            let _ = sender_in.send(PlaylistsViewInput::CoversBatch {
+                                token: cover_token,
+                                covers,
+                            });
+                        },
+                    );
+                }
+            }
+            PlaylistsViewInput::CoversBatch { token, covers } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                self.covers.extend(covers);
             }
             PlaylistsViewInput::FetchFailed { token, error } => {
                 if token != self.fetch_token {
@@ -132,7 +169,14 @@ impl SimpleComponent for PlaylistsViewModel {
                     )));
                 } else {
                     for pl in &self.items {
-                        widgets.list.append(&build_playlist_row(pl, sender.clone()));
+                        let path = pl
+                            .square_image
+                            .as_deref()
+                            .or(pl.image.as_deref())
+                            .and_then(|id| self.covers.get(id).cloned());
+                        widgets
+                            .list
+                            .append(&build_playlist_row(pl, path, sender.clone()));
                     }
                 }
             }
@@ -149,6 +193,7 @@ fn clear_listbox(list: &ListBox) {
 
 fn build_playlist_row(
     pl: &Playlist,
+    cover_path: Option<PathBuf>,
     sender: ComponentSender<PlaylistsViewModel>,
 ) -> ListBoxRow {
     let row = ListBoxRow::builder()
@@ -168,6 +213,9 @@ fn build_playlist_row(
         .icon_name("audio-x-generic-symbolic")
         .pixel_size(48)
         .build();
+    if let Some(p) = cover_path {
+        cover.set_from_file(Some(&p));
+    }
     body.append(&cover);
 
     let info = GtkBox::builder()

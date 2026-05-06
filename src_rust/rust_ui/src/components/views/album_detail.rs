@@ -11,13 +11,20 @@ use relm4::gtk::{
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::path::PathBuf;
+
 use rust_tidal_core::api::{Album, Track};
 
 use crate::components::views::common::{
     album_artist_name, build_error_widget, build_loading_widget, build_track_row,
     LibraryViewOutput, ViewLoadState,
 };
+use crate::services::covers::fetch_cover_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+/// Header cover size — slightly larger than the 180px display size so
+/// downscaling looks crisp.
+const HEADER_COVER_SIZE: u32 = 320;
 
 pub struct AlbumDetailInit {
     pub session: TidalSessionService,
@@ -40,6 +47,9 @@ pub struct AlbumDetailViewModel {
     /// list, since the track list is the primary content.
     header_done: bool,
     tracks_done: bool,
+    /// Cached cover-art path for the album header. Populated by a
+    /// post-header background fetch; absent until the cover is ready.
+    cover_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +59,7 @@ pub enum AlbumDetailInput {
     HeaderFailed { token: u64, error: String },
     TracksResult { token: u64, items: Vec<Track> },
     TracksFailed { token: u64, error: String },
+    CoverResult { token: u64, path: PathBuf },
     /// Index into `tracks` — handler emits PlayContext with the album
     /// as the queue source.
     Play(usize),
@@ -101,6 +112,7 @@ impl SimpleComponent for AlbumDetailViewModel {
             fetch_token: 0,
             header_done: false,
             tracks_done: false,
+            cover_path: None,
         };
         let widgets = AlbumDetailWidgets {
             root: root.clone(),
@@ -161,9 +173,30 @@ impl SimpleComponent for AlbumDetailViewModel {
                 if token != self.fetch_token {
                     return;
                 }
+                if let Some(cover_id) = album.cover.clone() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_cover_blocking(&cover_id, HEADER_COVER_SIZE),
+                        move |result| {
+                            if let Ok(path) = result {
+                                let _ = sender_in.send(AlbumDetailInput::CoverResult {
+                                    token: cover_token,
+                                    path,
+                                });
+                            }
+                        },
+                    );
+                }
                 self.album = Some(album);
                 self.header_done = true;
                 self.maybe_finish();
+            }
+            AlbumDetailInput::CoverResult { token, path } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                self.cover_path = Some(path);
             }
             AlbumDetailInput::HeaderFailed { token, error } => {
                 if token != self.fetch_token {
@@ -235,6 +268,7 @@ impl SimpleComponent for AlbumDetailViewModel {
 
         widgets.body.append(&build_header(
             self.album.as_ref(),
+            self.cover_path.as_deref(),
             &self.initial_title,
             sender.clone(),
         ));
@@ -275,6 +309,7 @@ fn clear_box(b: &GtkBox) {
 
 fn build_header(
     album: Option<&Album>,
+    cover_path: Option<&std::path::Path>,
     initial_title: &str,
     sender: ComponentSender<AlbumDetailViewModel>,
 ) -> GtkBox {
@@ -289,6 +324,9 @@ fn build_header(
         .pixel_size(180)
         .css_classes(["album-cover-img"])
         .build();
+    if let Some(p) = cover_path {
+        cover.set_from_file(Some(p));
+    }
     header.append(&cover);
 
     let info = GtkBox::builder()

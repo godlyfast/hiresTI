@@ -10,13 +10,18 @@ use relm4::gtk::{
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::path::PathBuf;
+
 use rust_tidal_core::api::{Album, Artist, Bio, Track};
 
 use crate::components::views::common::{
     album_artist_name, build_error_widget, build_loading_widget, build_track_row,
     LibraryViewOutput, ViewLoadState,
 };
+use crate::services::covers::fetch_cover_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+const HEADER_COVER_SIZE: u32 = 320;
 
 pub struct ArtistDetailInit {
     pub session: TidalSessionService,
@@ -37,6 +42,7 @@ pub struct ArtistDetailViewModel {
     artist_done: bool,
     top_tracks_done: bool,
     albums_done: bool,
+    cover_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +55,7 @@ pub enum ArtistDetailInput {
     TopTracksFailed { token: u64, error: String },
     AlbumsResult { token: u64, items: Vec<Album> },
     AlbumsFailed { token: u64, error: String },
+    CoverResult { token: u64, path: PathBuf },
     /// Index into `top_tracks` — handler emits PlayContext with the
     /// artist's top tracks as the queue source.
     Play(usize),
@@ -104,6 +111,7 @@ impl SimpleComponent for ArtistDetailViewModel {
             artist_done: false,
             top_tracks_done: false,
             albums_done: false,
+            cover_path: None,
         };
         let widgets = ArtistDetailWidgets {
             root: root.clone(),
@@ -194,9 +202,30 @@ impl SimpleComponent for ArtistDetailViewModel {
                 if token != self.fetch_token {
                     return;
                 }
+                if let Some(cover_id) = artist.picture.clone() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_cover_blocking(&cover_id, HEADER_COVER_SIZE),
+                        move |result| {
+                            if let Ok(path) = result {
+                                let _ = sender_in.send(ArtistDetailInput::CoverResult {
+                                    token: cover_token,
+                                    path,
+                                });
+                            }
+                        },
+                    );
+                }
                 self.artist = Some(artist);
                 self.artist_done = true;
                 self.maybe_finish();
+            }
+            ArtistDetailInput::CoverResult { token, path } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                self.cover_path = Some(path);
             }
             ArtistDetailInput::ArtistFailed { token, error } => {
                 if token != self.fetch_token {
@@ -292,6 +321,7 @@ impl SimpleComponent for ArtistDetailViewModel {
         widgets.body.append(&build_header(
             self.artist.as_ref(),
             self.bio.as_ref(),
+            self.cover_path.as_deref(),
             &self.initial_name,
         ));
 
@@ -354,7 +384,12 @@ fn section_label(text: &str) -> Label {
         .build()
 }
 
-fn build_header(artist: Option<&Artist>, bio: Option<&Bio>, initial_name: &str) -> GtkBox {
+fn build_header(
+    artist: Option<&Artist>,
+    bio: Option<&Bio>,
+    cover_path: Option<&std::path::Path>,
+    initial_name: &str,
+) -> GtkBox {
     let header = GtkBox::builder()
         .orientation(Orientation::Horizontal)
         .spacing(20)
@@ -366,6 +401,9 @@ fn build_header(artist: Option<&Artist>, bio: Option<&Bio>, initial_name: &str) 
         .pixel_size(180)
         .css_classes(["album-cover-img"])
         .build();
+    if let Some(p) = cover_path {
+        avatar.set_from_file(Some(p));
+    }
     header.append(&avatar);
 
     let info = GtkBox::builder()

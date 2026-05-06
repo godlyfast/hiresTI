@@ -6,19 +6,26 @@ use relm4::gtk::{
 };
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use rust_tidal_core::api::Artist;
 
 use crate::components::views::common::{
-    build_empty_widget, build_error_widget, build_loading_widget, LibraryViewOutput,
+    build_empty_widget, build_error_widget, build_loading_widget, CoverPaths, LibraryViewOutput,
     ViewLoadState,
 };
+use crate::services::covers::fetch_covers_batch_blocking;
 use crate::services::tidal_session::{spawn_blocking, TidalSessionService};
+
+const COVER_SIZE: u32 = 160;
 
 pub struct ArtistsViewModel {
     session: TidalSessionService,
     items: Vec<Artist>,
     state: ViewLoadState,
     fetch_token: u64,
+    covers: CoverPaths,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +33,7 @@ pub enum ArtistsViewInput {
     Refresh,
     FetchResult { token: u64, items: Vec<Artist> },
     FetchFailed { token: u64, error: String },
+    CoversBatch { token: u64, covers: HashMap<String, PathBuf> },
     Open(String, String),
 }
 
@@ -74,6 +82,7 @@ impl SimpleComponent for ArtistsViewModel {
                 items: Vec::new(),
                 state: ViewLoadState::Idle,
                 fetch_token: 0,
+                covers: HashMap::new(),
             },
             widgets: ArtistsViewWidgets {
                 root: root.clone(),
@@ -110,8 +119,32 @@ impl SimpleComponent for ArtistsViewModel {
                 if token != self.fetch_token {
                     return;
                 }
+                let cover_ids: Vec<String> = items
+                    .iter()
+                    .filter_map(|a| a.picture.clone())
+                    .filter(|id| !self.covers.contains_key(id))
+                    .collect();
                 self.items = items;
                 self.state = ViewLoadState::Loaded;
+                if !cover_ids.is_empty() {
+                    let cover_token = self.fetch_token;
+                    let sender_in = sender.input_sender().clone();
+                    spawn_blocking(
+                        move || fetch_covers_batch_blocking(cover_ids, COVER_SIZE),
+                        move |covers| {
+                            let _ = sender_in.send(ArtistsViewInput::CoversBatch {
+                                token: cover_token,
+                                covers,
+                            });
+                        },
+                    );
+                }
+            }
+            ArtistsViewInput::CoversBatch { token, covers } => {
+                if token != self.fetch_token {
+                    return;
+                }
+                self.covers.extend(covers);
             }
             ArtistsViewInput::FetchFailed { token, error } => {
                 if token != self.fetch_token {
@@ -140,7 +173,11 @@ impl SimpleComponent for ArtistsViewModel {
                     )));
                 } else {
                     for artist in &self.items {
-                        let card = build_artist_card(artist, sender.clone());
+                        let path = artist
+                            .picture
+                            .as_deref()
+                            .and_then(|id| self.covers.get(id).cloned());
+                        let card = build_artist_card(artist, path, sender.clone());
                         let child = FlowBoxChild::builder().child(&card).build();
                         widgets.flow.append(&child);
                     }
@@ -157,7 +194,11 @@ fn clear_flowbox(flow: &FlowBox) {
     }
 }
 
-fn build_artist_card(artist: &Artist, sender: ComponentSender<ArtistsViewModel>) -> GtkBox {
+fn build_artist_card(
+    artist: &Artist,
+    cover_path: Option<PathBuf>,
+    sender: ComponentSender<ArtistsViewModel>,
+) -> GtkBox {
     let card = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(4)
@@ -168,6 +209,9 @@ fn build_artist_card(artist: &Artist, sender: ComponentSender<ArtistsViewModel>)
         .pixel_size(160)
         .css_classes(["circular-avatar"])
         .build();
+    if let Some(p) = cover_path {
+        cover.set_from_file(Some(&p));
+    }
     card.append(&cover);
     let name_label = Label::builder()
         .label(if artist.name.is_empty() {

@@ -8,6 +8,8 @@
 //!   error label, empty-state label) so views don't reinvent the
 //!   styling.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use relm4::gtk::{
@@ -18,6 +20,13 @@ use relm4::gtk::{
 use rust_tidal_core::api::{Album, ArtistRef, PageCategory, PageItem, Track};
 
 use crate::state::playback::PlaybackSource;
+
+/// Cover-art lookup map: cover_id → cached file path. Views build one
+/// of these as covers stream in from the background fetcher and pass
+/// it (by reference) into the page-rendering helpers so each card can
+/// swap its placeholder for the real image without a separate widget
+/// registry.
+pub type CoverPaths = HashMap<String, PathBuf>;
 
 /// Type alias for the click-dispatch callback library/discovery views
 /// pass to the page-rendering helpers. Owned + reference-counted so a
@@ -215,6 +224,22 @@ where
     row
 }
 
+/// Pull the cover-id out of a PageItem if the underlying model carries
+/// one. Used by views to compute the cover-fetch worklist after a page
+/// loads. PageItem variants without a model-level cover (e.g. Cards
+/// surfaced as PageLinks) return None.
+pub fn page_item_cover_id(item: &PageItem) -> Option<String> {
+    match item {
+        PageItem::Track(t) => t.album.as_ref().and_then(|a| a.cover.clone()),
+        PageItem::Album(a) => a.cover.clone(),
+        PageItem::Artist(a) => a.picture.clone(),
+        PageItem::Playlist(p) => p.square_image.clone().or_else(|| p.image.clone()),
+        PageItem::Mix(m) => m.image.clone().or_else(|| m.detail_image.clone()),
+        PageItem::Video(v) => v.image_id.clone(),
+        PageItem::Card(c) => c.image_id.clone(),
+    }
+}
+
 /// Render a single `/pages/*` category as a section: title + subtitle +
 /// horizontal flow of item cards. Each card click dispatches via the
 /// shared `on_open` callback. Empty categories render a single
@@ -222,6 +247,7 @@ where
 pub fn build_page_category_section(
     category: &PageCategory,
     on_open: CategoryOpener,
+    covers: &CoverPaths,
 ) -> GtkBox {
     let section = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -264,7 +290,7 @@ pub fn build_page_category_section(
         .homogeneous(true)
         .build();
     for item in &category.items {
-        if let Some(card) = build_page_item_card(item, on_open.clone()) {
+        if let Some(card) = build_page_item_card(item, on_open.clone(), covers) {
             let child = FlowBoxChild::builder().child(&card).build();
             flow.append(&child);
         }
@@ -275,9 +301,14 @@ pub fn build_page_category_section(
 
 /// Render a single `PageItem` as a clickable card. Returns `None` for
 /// item types we intentionally skip in discovery surfaces (videos in
-/// Phase 7). The cover slot is a placeholder icon — Phase 7-I swaps it
-/// for the real resources.tidal.com fetch.
-pub fn build_page_item_card(item: &PageItem, on_open: CategoryOpener) -> Option<GtkBox> {
+/// Phase 7). When the item has a cover_id and `covers` has its cached
+/// path, the Image is loaded from disk; otherwise the placeholder
+/// icon stays.
+pub fn build_page_item_card(
+    item: &PageItem,
+    on_open: CategoryOpener,
+    covers: &CoverPaths,
+) -> Option<GtkBox> {
     let card = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(4)
@@ -289,6 +320,11 @@ pub fn build_page_item_card(item: &PageItem, on_open: CategoryOpener) -> Option<
         .pixel_size(160)
         .css_classes(["album-cover-img"])
         .build();
+    if let Some(cover_id) = page_item_cover_id(item) {
+        if let Some(path) = covers.get(&cover_id) {
+            cover.set_from_file(Some(path));
+        }
+    }
     card.append(&cover);
 
     let (primary, secondary, click_output): (String, String, Option<LibraryViewOutput>) = match item {
