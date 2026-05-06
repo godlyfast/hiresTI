@@ -33,6 +33,7 @@ pub enum HeaderOutput {
     OpenAbout,
     OpenDiagnostics,
     OpenSignalPath,
+    OpenDspPresets,
     BackPressed,
 }
 
@@ -213,6 +214,20 @@ fn build_settings_popover(sender: ComponentSender<HeaderModel>) -> gtk::Popover 
         .build();
     lb.append(&path_row);
 
+    let presets_row = gtk::ListBoxRow::builder()
+        .child(
+            &Label::builder()
+                .label("DSP Presets")
+                .xalign(0.0)
+                .margin_top(6)
+                .margin_bottom(6)
+                .margin_start(12)
+                .margin_end(12)
+                .build(),
+        )
+        .build();
+    lb.append(&presets_row);
+
     let pop_clone = pop.clone();
     let sender_clone = sender.clone();
     lb.connect_row_activated(move |_, row| {
@@ -225,6 +240,8 @@ fn build_settings_popover(sender: ComponentSender<HeaderModel>) -> gtk::Popover 
             let _ = sender_clone.output(HeaderOutput::OpenDiagnostics);
         } else if row == &path_row {
             let _ = sender_clone.output(HeaderOutput::OpenSignalPath);
+        } else if row == &presets_row {
+            let _ = sender_clone.output(HeaderOutput::OpenDspPresets);
         }
     });
 

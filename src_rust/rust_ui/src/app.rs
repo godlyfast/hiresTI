@@ -27,6 +27,7 @@ use relm4::{
 
 use crate::components::about_dialog;
 use crate::components::diagnostics_dialog::{self, EngineSnapshot};
+use crate::components::dsp_preset_dialog;
 use crate::components::settings_dialog;
 use crate::components::signal_path_window;
 use crate::components::content_stack::{
@@ -181,6 +182,7 @@ impl SimpleComponent for AppController {
                 HeaderOutput::OpenAbout => AppInput::OpenAbout,
                 HeaderOutput::OpenDiagnostics => AppInput::OpenDiagnostics,
                 HeaderOutput::OpenSignalPath => AppInput::OpenSignalPath,
+                HeaderOutput::OpenDspPresets => AppInput::OpenDspPresets,
                 HeaderOutput::BackPressed => AppInput::CloseDetail,
             },
         );
@@ -542,6 +544,13 @@ impl SimpleComponent for AppController {
             }
             AppInput::OpenSignalPath => {
                 signal_path_window::present(self.window_for_dialogs.upcast_ref(), &self.model);
+            }
+            AppInput::OpenDspPresets => {
+                dsp_preset_dialog::present(
+                    self.window_for_dialogs.upcast_ref(),
+                    &self.model.settings,
+                    sender.input_sender().clone(),
+                );
             }
             AppInput::OpenDiagnostics => {
                 let snap = match self.engine.as_ref() {

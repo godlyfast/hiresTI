@@ -6,4 +6,5 @@
 //! worker thread, etc.).
 
 pub mod covers;
+pub mod dsp_preset;
 pub mod tidal_session;

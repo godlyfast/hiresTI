@@ -38,6 +38,7 @@ pub enum AppInput {
     OpenAbout,
     OpenDiagnostics,
     OpenSignalPath,
+    OpenDspPresets,
 
     // ---- Mini player outputs ---------------------------------------
     TransportPlay,
