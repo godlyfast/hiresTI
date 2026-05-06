@@ -11,5 +11,6 @@ pub mod content_stack;
 pub mod header;
 pub mod login_dialog;
 pub mod mini_player;
+pub mod settings_dialog;
 pub mod sidebar;
 pub mod views;

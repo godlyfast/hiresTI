@@ -23,6 +23,7 @@ use relm4::{
 };
 
 use crate::components::about_dialog;
+use crate::components::settings_dialog;
 use crate::components::content_stack::{
     ContentStackInit, ContentStackInput, ContentStackModel,
 };
@@ -443,8 +444,28 @@ impl SimpleComponent for AppController {
                 }
             }
             AppInput::ApplySettings(new) => {
+                let driver_changed = settings_str(&self.model.settings, "driver")
+                    != settings_str(&new, "driver")
+                    || settings_str(&self.model.settings, "device")
+                        != settings_str(&new, "device");
                 self.model.settings = new;
                 self.persist_settings();
+                // Live-apply driver/device deltas to the engine so the
+                // user doesn't have to restart for output changes.
+                // Other audio settings (latency, mmap rt, exclusive)
+                // need a fresh engine and stay deferred to next launch.
+                if driver_changed {
+                    if let Some(engine) = self.engine.as_mut() {
+                        let driver = settings_str(&self.model.settings, "driver")
+                            .unwrap_or_default();
+                        let device = settings_str(&self.model.settings, "device");
+                        let device_ref = device.as_deref().filter(|s| !s.is_empty());
+                        let rc = engine.set_output(&driver, device_ref);
+                        if rc != 0 {
+                            tracing::warn!(rc, %driver, "engine.set_output rejected new driver/device");
+                        }
+                    }
+                }
             }
             AppInput::Search(q) => {
                 tracing::info!(query = %q, "search submitted (Phase 7 will route this)");
@@ -493,7 +514,11 @@ impl SimpleComponent for AppController {
                 self.apply_auth_result(None);
             }
             AppInput::OpenSettings => {
-                tracing::info!("settings dialog requested (Phase 8)");
+                settings_dialog::present(
+                    self.window_for_dialogs.upcast_ref(),
+                    &self.model.settings,
+                    sender.input_sender().clone(),
+                );
             }
             AppInput::OpenAbout => {
                 about_dialog::present(self.window_for_dialogs.upcast_ref());
@@ -834,10 +859,11 @@ impl AppController {
             .ok();
 
         let svc = self.session.clone();
-        // Phase 7-C uses HI_RES_LOSSLESS unconditionally. Phase 8 wires
-        // the quality setting + per-track downgrade fallback chain that
-        // Python's _resolve_quality_chain handles.
-        let quality = "HI_RES_LOSSLESS".to_string();
+        // Phase 8-E reads quality from settings.audio_quality. Phase 8-G
+        // will add the per-track downgrade fallback chain that Python's
+        // _resolve_quality_chain handles.
+        let quality = settings_str(&self.model.settings, "audio_quality")
+            .unwrap_or_else(|| "HI_RES_LOSSLESS".to_string());
         let sender_in = sender.input_sender().clone();
         spawn_blocking(
             move || svc.resolve_playback_blocking(track_id, &quality),
@@ -1126,6 +1152,13 @@ impl AppController {
 /// view forwards through this so a click on an artist link inside an
 /// album-detail page reaches the same root handler as a click on an
 /// artist tile in the Artists library page.
+fn settings_str(s: &Settings, key: &str) -> Option<String> {
+    s.extra
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 fn make_lib_forward() -> impl Fn(LibraryViewOutput) -> AppInput + 'static + Copy {
     |out| match out {
         LibraryViewOutput::OpenAlbum { id, title } => AppInput::OpenAlbum { id, title },
