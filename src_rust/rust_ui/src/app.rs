@@ -40,6 +40,7 @@ use crate::components::views::discovery::{
     DiscoverySource, DiscoveryViewInit, DiscoveryViewInput, DiscoveryViewModel,
 };
 use crate::components::views::history::{HistoryViewInput, HistoryViewModel};
+use crate::components::views::mix_detail::{MixDetailInit, MixDetailViewModel};
 use crate::components::views::mixes::{MixesViewInput, MixesViewModel};
 use crate::components::views::playlist_detail::{PlaylistDetailInit, PlaylistDetailViewModel};
 use crate::components::views::playlists::{PlaylistsViewInput, PlaylistsViewModel};
@@ -97,6 +98,7 @@ enum DetailPage {
     Album(Controller<AlbumDetailViewModel>),
     Playlist(Controller<PlaylistDetailViewModel>),
     Artist(Controller<ArtistDetailViewModel>),
+    Mix(Controller<MixDetailViewModel>),
 }
 
 impl DetailPage {
@@ -105,6 +107,7 @@ impl DetailPage {
             DetailPage::Album(c) => c.widget().clone().into(),
             DetailPage::Playlist(c) => c.widget().clone().into(),
             DetailPage::Artist(c) => c.widget().clone().into(),
+            DetailPage::Mix(c) => c.widget().clone().into(),
         }
     }
 }
@@ -450,7 +453,7 @@ impl SimpleComponent for AppController {
                 self.open_playlist_detail(uuid, title, sender.clone());
             }
             AppInput::OpenMix { id, title } => {
-                tracing::info!(%id, %title, "open mix (Phase 7-B wires the mix detail view)");
+                self.open_mix_detail(id, title, sender.clone());
             }
             AppInput::CloseDetail => {
                 self.close_detail();
@@ -563,6 +566,23 @@ impl AppController {
             })
             .forward(sender.input_sender(), lib_forward);
         self.install_detail(DetailPage::Playlist(view));
+    }
+
+    fn open_mix_detail(
+        &mut self,
+        mix_id: String,
+        title: String,
+        sender: ComponentSender<Self>,
+    ) {
+        let lib_forward = make_lib_forward();
+        let view = MixDetailViewModel::builder()
+            .launch(MixDetailInit {
+                session: self.session.clone(),
+                mix_id,
+                initial_title: title,
+            })
+            .forward(sender.input_sender(), lib_forward);
+        self.install_detail(DetailPage::Mix(view));
     }
 
     fn open_artist_detail(

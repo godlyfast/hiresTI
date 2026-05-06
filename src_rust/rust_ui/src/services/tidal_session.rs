@@ -190,6 +190,44 @@ impl TidalSessionService {
         self.session.artist_bio(id)
     }
 
+    pub fn fetch_mix_blocking(&self, id: &str) -> Result<Mix, RtcError> {
+        self.session.fetch_mix(id)
+    }
+
+    /// Drain a Mix's items into a Track-only Vec. Mixed-content videos
+    /// are dropped — Phase 8 will surface them in the UI.
+    pub fn list_mix_tracks_blocking(&self, id: &str) -> Result<Vec<Track>, RtcError> {
+        let mut out: Vec<Track> = Vec::new();
+        let mut offset: i32 = 0;
+        let limit: i32 = 200;
+        loop {
+            let args = ListArgs {
+                limit,
+                offset,
+                order: None,
+                order_direction: None,
+            };
+            let page = self.session.mix_items_list(id, &args)?;
+            let n = page.items.len() as i32;
+            for it in page.items {
+                if let rust_tidal_core::api::PlaylistItem::Track(t) = it {
+                    out.push(t);
+                }
+            }
+            if n < limit
+                || (page.total_number_of_items > 0
+                    && offset + n >= page.total_number_of_items)
+            {
+                break;
+            }
+            offset += n;
+            if offset > 100_000 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     // ---- Discovery pages (Phase 6) ---------------------------------
     //
     // `pages/<path>` lookups all share the same parser; the only thing

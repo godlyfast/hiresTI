@@ -11,6 +11,7 @@ pub mod artists;
 pub mod common;
 pub mod discovery;
 pub mod history;
+pub mod mix_detail;
 pub mod mixes;
 pub mod playlist_detail;
 pub mod playlists;
