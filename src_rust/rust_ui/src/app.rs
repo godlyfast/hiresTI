@@ -1612,21 +1612,34 @@ impl AppController {
             },
         );
 
-        // Hand the URL to rust_audio_core. The resolver already falls
-        // back to the legacy URL endpoint for MPD manifests so we
-        // expect a single playable URL here for both BTS and MPD; if
-        // the fallback was suppressed (PKCE token + hi-res quality)
-        // there'll be no URL and we degrade to a stop.
-        let Some(url) = resolved.url else {
+        // Resolve to an engine-loadable URI. Three cases:
+        //   1. `resolved.url`   = direct media URL (BTS / hires direct).
+        //   2. `mpd_manifest`   = inline DASH XML — write to a temp .mpd
+        //                         file and hand the engine a `file://`.
+        //   3. Neither          = degrade to Stopped.
+        let engine_uri: String = if let Some(url) = resolved.url.clone() {
+            url
+        } else if let Some(manifest) = resolved.mpd_manifest.as_deref() {
+            match stage_mpd_manifest(track.id, manifest) {
+                Ok(path) => format!("file://{}", path.display()),
+                Err(e) => {
+                    tracing::warn!(track_id = track.id, error = %e, "MPD manifest stage failed");
+                    self.model.playback.transport = TransportState::Stopped;
+                    self.mpris_sync_transport();
+                    return;
+                }
+            }
+        } else {
             tracing::warn!(
                 track_id = track.id,
                 is_mpd = resolved.is_mpd,
-                "stream resolved without a URL"
+                "stream resolved with neither URL nor manifest"
             );
             self.model.playback.transport = TransportState::Stopped;
             self.mpris_sync_transport();
             return;
         };
+        let url = engine_uri;
         let Some(engine) = self.engine.as_mut() else {
             tracing::info!(track_id = track.id, %url, "no audio engine — staying in Buffering");
             return;
@@ -2040,6 +2053,24 @@ fn fill_profile_from_json(p: &mut UserProfile, json: &serde_json::Value) {
     }
     // displayName / nickName is owned by the profileMetadata endpoint;
     // not fetched here yet (matches Python behavior of best-effort).
+}
+
+/// Tidal Hi-Res / Lossless tracks come back as DASH manifests
+/// inlined in the playback-info JSON instead of a single direct URL.
+/// `rust_audio_core` knows how to play `.mpd` files referenced as
+/// `file://...`, so we stage the XML to the per-track cache slot and
+/// return the on-disk path.
+fn stage_mpd_manifest(
+    track_id: i64,
+    manifest_xml: &str,
+) -> Result<std::path::PathBuf, std::io::Error> {
+    let dir = crate::paths::cache_dir()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+        .join("mpd");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{track_id}.mpd"));
+    std::fs::write(&path, manifest_xml.as_bytes())?;
+    Ok(path)
 }
 
 fn open_in_browser(url: &str) -> std::io::Result<()> {
