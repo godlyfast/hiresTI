@@ -7,6 +7,7 @@
 pub mod albums;
 pub mod artists;
 pub mod common;
+pub mod discovery;
 pub mod history;
 pub mod mixes;
 pub mod playlists;

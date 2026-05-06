@@ -34,6 +34,9 @@ use crate::components::sidebar::{SidebarInput, SidebarModel, SidebarOutput};
 use crate::components::views::albums::{AlbumsViewInput, AlbumsViewModel};
 use crate::components::views::artists::{ArtistsViewInput, ArtistsViewModel};
 use crate::components::views::common::LibraryViewOutput;
+use crate::components::views::discovery::{
+    DiscoverySource, DiscoveryViewInit, DiscoveryViewInput, DiscoveryViewModel,
+};
 use crate::components::views::history::{HistoryViewInput, HistoryViewModel};
 use crate::components::views::mixes::{MixesViewInput, MixesViewModel};
 use crate::components::views::playlists::{PlaylistsViewInput, PlaylistsViewModel};
@@ -70,6 +73,14 @@ pub struct AppController {
     mixes_view: Controller<MixesViewModel>,
     #[allow(dead_code)]
     history_view: Controller<HistoryViewModel>,
+
+    // Discovery views (Phase 6). Home / New / Top / Hi-Res share one
+    // shared component; Genres / Decades / Moods are tab-style and
+    // come in Phase 6.5.
+    home_view: Controller<DiscoveryViewModel>,
+    new_view: Controller<DiscoveryViewModel>,
+    top_view: Controller<DiscoveryViewModel>,
+    hires_view: Controller<DiscoveryViewModel>,
 }
 
 pub struct AppWidgets {
@@ -148,10 +159,44 @@ impl SimpleComponent for AppController {
             .launch(())
             .forward(sender.input_sender(), lib_forward);
 
+        let home_view = DiscoveryViewModel::builder()
+            .launch(DiscoveryViewInit {
+                session: session.clone(),
+                source: DiscoverySource::Home,
+                empty_message:
+                    "Your home feed is empty. Try refreshing or favorite some music to seed it.",
+            })
+            .forward(sender.input_sender(), lib_forward);
+        let new_view = DiscoveryViewModel::builder()
+            .launch(DiscoveryViewInit {
+                session: session.clone(),
+                source: DiscoverySource::Path("pages/explore_new_music".into()),
+                empty_message: "TIDAL didn't return any New Music sections.",
+            })
+            .forward(sender.input_sender(), lib_forward);
+        let top_view = DiscoveryViewModel::builder()
+            .launch(DiscoveryViewInit {
+                session: session.clone(),
+                source: DiscoverySource::Path("pages/explore_top_music".into()),
+                empty_message: "TIDAL didn't return any Top Music sections.",
+            })
+            .forward(sender.input_sender(), lib_forward);
+        let hires_view = DiscoveryViewModel::builder()
+            .launch(DiscoveryViewInit {
+                session: session.clone(),
+                source: DiscoverySource::Path("pages/hires".into()),
+                empty_message: "No Hi-Res sections available right now.",
+            })
+            .forward(sender.input_sender(), lib_forward);
+
         let content = ContentStackModel::builder()
             .launch(ContentStackInit {
                 current: init.current_nav,
                 pages: vec![
+                    (NavTarget::Home, home_view.widget().clone().into()),
+                    (NavTarget::New, new_view.widget().clone().into()),
+                    (NavTarget::Top, top_view.widget().clone().into()),
+                    (NavTarget::HiRes, hires_view.widget().clone().into()),
                     (NavTarget::Albums, albums_view.widget().clone().into()),
                     (NavTarget::Tracks, tracks_view.widget().clone().into()),
                     (NavTarget::Artists, artists_view.widget().clone().into()),
@@ -244,6 +289,10 @@ impl SimpleComponent for AppController {
             playlists_view,
             mixes_view,
             history_view,
+            home_view,
+            new_view,
+            top_view,
+            hires_view,
         };
         let widgets = AppWidgets { window: root };
         ComponentParts { model, widgets }
@@ -423,9 +472,21 @@ impl AppController {
             NavTarget::History => {
                 self.history_view.sender().send(HistoryViewInput::Refresh).ok();
             }
-            // Discovery views (Home / New / Top / Hi-Res / Genres /
-            // Decades / Moods) wire in Phase 6.
-            _ => {}
+            NavTarget::Home => {
+                self.home_view.sender().send(DiscoveryViewInput::Refresh).ok();
+            }
+            NavTarget::New => {
+                self.new_view.sender().send(DiscoveryViewInput::Refresh).ok();
+            }
+            NavTarget::Top => {
+                self.top_view.sender().send(DiscoveryViewInput::Refresh).ok();
+            }
+            NavTarget::HiRes => {
+                self.hires_view.sender().send(DiscoveryViewInput::Refresh).ok();
+            }
+            // Tab-style discovery surfaces (Genres / Decades / Moods)
+            // need their own component shape — Phase 6.5.
+            NavTarget::Genres | NavTarget::Decades | NavTarget::Moods => {}
         }
     }
 

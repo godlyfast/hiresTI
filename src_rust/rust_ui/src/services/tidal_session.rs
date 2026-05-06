@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::thread;
 
 use rust_tidal_core::api::{
-    read_persisted_token, write_persisted_token, Album, Artist, DeviceLogin, ListArgs, Mix,
+    read_persisted_token, write_persisted_token, Album, Artist, DeviceLogin, ListArgs, Mix, Page,
     PersistedToken, Playlist, RequestArgs, RtcError, Session, Track, UserInfo,
 };
 
@@ -147,6 +147,20 @@ impl TidalSessionService {
     }
     pub fn list_user_playlists_blocking(&self) -> Result<Vec<Playlist>, RtcError> {
         drain_pages(|args| self.session.list_user_playlists("root", args))
+    }
+
+    // ---- Discovery pages (Phase 6) ---------------------------------
+    //
+    // `pages/<path>` lookups all share the same parser; the only thing
+    // that varies is the path. Home is the odd one out — it lives on
+    // /v2/home/feed/static — so it gets its own helper.
+
+    pub fn fetch_home_page_blocking(&self) -> Result<Page, RtcError> {
+        self.session.fetch_home_feed()
+    }
+
+    pub fn fetch_discovery_page_blocking(&self, path: &str) -> Result<Page, RtcError> {
+        self.session.fetch_page(path, None)
     }
 
     /// Read the user-profile fields from `/v1/users/{id}` and merge with

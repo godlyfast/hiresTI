@@ -13,6 +13,7 @@ mod favorites;
 mod http;
 mod lists;
 mod models;
+mod pages;
 mod request;
 mod session;
 mod stream;
@@ -25,7 +26,8 @@ pub mod api {
     pub use crate::auth::DeviceLogin;
     pub use crate::error::{RtcError, RtcResult};
     pub use crate::favorites::{ListArgs, PageResponse};
-    pub use crate::models::{Album, Artist, Folder, Mix, Playlist, Track};
+    pub use crate::models::{Album, Artist, ArtistRef, Folder, Mix, Playlist, Track, Video};
+    pub use crate::pages::{Card, More, Page, PageCategory, PageItem};
     pub use crate::request::{RequestArgs, ResponseJson};
     pub use crate::session::{
         read_persisted_token, write_persisted_token, PersistedToken, Session, UserInfo,

@@ -287,6 +287,16 @@ impl Session {
     ) -> RtcResult<serde_json::Value> {
         endpoints::page_get_raw(self, path, extra_params)
     }
+    pub fn fetch_page(
+        &self,
+        path: &str,
+        extra_params: Option<std::collections::BTreeMap<String, ParamValue>>,
+    ) -> RtcResult<crate::pages::Page> {
+        crate::pages::fetch_page(self, path, extra_params)
+    }
+    pub fn fetch_home_feed(&self) -> RtcResult<crate::pages::Page> {
+        crate::pages::fetch_home_feed(self)
+    }
 
     // ----- Favorites (Phase 4) -----
     pub fn favorites_add(&self, kind: FavoriteKind, id: &str) -> RtcResult<bool> {
