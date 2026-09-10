@@ -3254,6 +3254,41 @@ class TidalBackend:
             logger.warning("Get tracks error [%s]: %s", classify_exception(e), e)
             return []
 
+    def get_playlist_playback_queue(self, playlist_or_id, shuffled=False):
+        from models.playlist_queue import PlaylistQueue
+
+        # Refresh metadata once per playback request, independently of browsing.
+        # Use /tracks (not mixed /items) so offsets match numberOfTracks.
+        pid = getattr(playlist_or_id, "id", playlist_or_id)
+        pl = self._call_with_session_recovery(
+            lambda: self.session.playlist(pid), context="playlist playback"
+        )
+        total = getattr(pl, "num_tracks", None)
+        if total is None or int(total) < 0 or not callable(getattr(pl, "tracks", None)):
+            raise ValueError("The playlist track count is unavailable. Please try again.")
+        etag = getattr(pl, "_etag", None)
+        playlist_session = self.session
+
+        def fetch_track(position):
+            def fetch_page():
+                nonlocal pl, playlist_session
+                if playlist_session is not self.session:
+                    pl = self.session.playlist(pid)
+                    playlist_session = self.session
+                return list(pl.tracks(limit=1, offset=position) or [])
+
+            page = self._call_with_session_recovery(
+                fetch_page,
+                context="playlist playback track",
+            )
+            if etag is not None and getattr(pl, "_etag", None) != etag:
+                raise ValueError("The playlist has changed. Please start it again.")
+            if len(page) != 1:
+                raise ValueError("The playlist track is unavailable. Please start the playlist again.")
+            return page[0]
+
+        return PlaylistQueue(int(total), fetch_track, getattr(pl, "name", "Playlist"), shuffled)
+
     def get_playlist_tracks_page(self, playlist_or_id, limit=100, offset=0):
         pl = self._resolve_user_playlist(playlist_or_id)
         if pl is None:

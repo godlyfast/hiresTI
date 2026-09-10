@@ -742,6 +742,8 @@ class MPRISService:
         self.sync_position(force=True)
 
     def _action_pause(self):
+        from actions.playlist_playback import cancel_pending_playlist
+        cancel_pending_playlist(self.app)
         player = getattr(self.app, "player", None)
         if player is not None and self._is_playing():
             try:
@@ -780,6 +782,8 @@ class MPRISService:
         self.sync_position(force=True)
 
     def _action_stop(self):
+        from actions.playlist_playback import cancel_pending_playlist
+        cancel_pending_playlist(self.app)
         player = getattr(self.app, "player", None)
         if player is not None:
             try:

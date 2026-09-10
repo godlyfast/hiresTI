@@ -7,6 +7,7 @@ from gi.repository import Gtk, GLib, Gdk
 from app.app_ui_loop import _is_now_playing_overlay_open, _ui_loop_has_high_frequency_consumer
 from core.errors import classify_exception, user_message
 from actions import audio_settings_actions
+from models.playlist_queue import PlaylistQueueTrack
 
 logger = logging.getLogger(__name__)
 MAX_PREFETCH_CACHE = 6
@@ -123,6 +124,10 @@ def _prefetch_next_track(app, current_index):
             return
 
         next_track = queue[next_idx]
+        if isinstance(next_track, PlaylistQueueTrack):
+            next_track = next_track.resolve()
+            if hasattr(app, "_refresh_queue_views"):
+                GLib.idle_add(app._refresh_queue_views)
         track_id = getattr(next_track, "id", None)
         if track_id is None:
             return
@@ -310,10 +315,16 @@ def play_track(app, index):
     if index < 0 or index >= len(queue):
         return
 
-    app.current_track_index = index
     app._play_request_id = getattr(app, "_play_request_id", 0) + 1
     request_id = app._play_request_id
     track = queue[index]
+    if isinstance(track, PlaylistQueueTrack):
+        if track.resolved_track is None:
+            from actions.playlist_playback import resolve_for_playback
+            resolve_for_playback(app, track, index, request_id)
+            return
+        track = track.resolved_track
+    app.current_track_index = index
     app.playing_track = track
     app.playing_track_id = track.id
     if hasattr(app, "_mpris_sync_metadata"):

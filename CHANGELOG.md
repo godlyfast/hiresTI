@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.9.9 - 2026-09-09
+
+Fix remote playlist playback being limited to the songs loaded by scrolling.
+
+### Fixed
+
+- **Shuffle covers the whole playlist (#89).** The playback queue now uses
+  all playlist positions independently of the visible list. Only the selected
+  song's metadata is needed to start playback; the next song is prefetched.
+- **Play and individual song selection also use the full remote playlist.**
+  Browsing remains paginated, and unresolved queue entries show a temporary
+  title until their metadata is fetched.
+- **Stable shuffle order.** Next-track playback and prefetch follow the same
+  random permutation without repeating playlist positions within a pass.
+- **Pending playback respects cancellation.** Switching playlists, selecting
+  another track, clearing the queue, or pausing/stopping through the UI,
+  MPRIS, or remote API prevents superseded requests from starting playback.
+- **Playlist changes and request failures are reported** instead of silently
+  playing a shifted position or replacing the queue with a partial playlist.
+
 ## 1.9.8 - 2026-08-17
 
 Feature release: **TIDAL Uploads in the library**, a **true-reading level

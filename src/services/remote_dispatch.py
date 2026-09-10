@@ -264,6 +264,8 @@ def _rpc_player_play(app, _params):
 
 def _rpc_player_pause(app, _params):
     def _pause():
+        from actions.playlist_playback import cancel_pending_playlist
+        cancel_pending_playlist(app)
         player = getattr(app, "player", None)
         if player is not None and player.is_playing():
             app.on_play_pause(None)
@@ -296,6 +298,8 @@ def _rpc_player_previous(app, _params):
 
 def _rpc_player_stop(app, _params):
     def _stop():
+        from actions.playlist_playback import cancel_pending_playlist
+        cancel_pending_playlist(app)
         player = getattr(app, "player", None)
         if player is not None:
             player.stop()

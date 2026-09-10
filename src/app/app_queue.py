@@ -28,6 +28,7 @@ def _get_current_track_view_tracks(self):
 
 
 def _set_play_queue(self, tracks):
+    self._playlist_play_request = getattr(self, "_playlist_play_request", 0) + 1
     self.play_queue = list(tracks or [])
     self.shuffle_indices = []
     if hasattr(self, "_render_now_playing_queue"):
@@ -205,7 +206,7 @@ def render_mini_queue(self):
 
     # Signature-based skip to avoid rebuilding unchanged queue.
     sig = (len(tracks), current_idx,
-           tuple(str(getattr(t, "id", id(t))) for t in tracks[:200]))
+           tuple(str(getattr(t, "id", None) or f"obj:{id(t)}") for t in tracks[:200]))
     if getattr(self, "_mini_queue_sig", None) == sig and list_box.get_first_child() is not None:
         return
 
@@ -518,6 +519,8 @@ def on_queue_remove_track_clicked(self, track_index):
 
 
 def on_queue_clear_clicked(self, _btn=None):
+    self._playlist_play_request = getattr(self, "_playlist_play_request", 0) + 1
+    self._play_request_id = getattr(self, "_play_request_id", 0) + 1
     tracks = self._get_active_queue()
     if not tracks:
         return

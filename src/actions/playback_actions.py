@@ -36,6 +36,9 @@ def _stop_after_queue_end(app):
 
 
 def _choose_shuffle_index(app, current, total):
+    from actions.playlist_playback import uses_shuffled_playlist_order
+    if uses_shuffled_playlist_order(app):
+        return (current + 1) % total
     if not hasattr(app, "shuffle_indices") or not app.shuffle_indices:
         app._generate_shuffle_list()
 
@@ -51,6 +54,8 @@ def _choose_shuffle_index(app, current, total):
 
 
 def on_play_pause(app, btn):
+    from actions.playlist_playback import cancel_pending_playlist
+    cancel_pending_playlist(app)
     if app.player.is_playing():
         app.player.pause()
         if btn is not None:

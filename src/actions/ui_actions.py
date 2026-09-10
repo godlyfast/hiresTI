@@ -1436,6 +1436,9 @@ def render_search_tracks_page(app):
 
 def _on_play_album_tracks(app):
     """Play album tracks from the beginning."""
+    from actions.playlist_playback import start_playlist
+    if start_playlist(app):
+        return
     tracks = list(app._get_current_track_view_tracks() if hasattr(app, "_get_current_track_view_tracks") else (getattr(app, "current_track_list", []) or []))
     if not tracks:
         return
@@ -1446,6 +1449,9 @@ def _on_play_album_tracks(app):
 
 def _on_shuffle_album_tracks(app):
     """Shuffle and play album tracks."""
+    from actions.playlist_playback import start_playlist
+    if start_playlist(app, shuffle=True):
+        return
     tracks = list(app._get_current_track_view_tracks() if hasattr(app, "_get_current_track_view_tracks") else (getattr(app, "current_track_list", []) or []))
     if not tracks:
         return
@@ -6611,7 +6617,7 @@ def render_queue_drawer(app):
     anchor = max(0, min(current_idx, total - 1)) if total > 0 else 0
     sig_start = max(0, anchor - _QUEUE_WINDOW_BEFORE)
     sig_end   = min(total, anchor + _QUEUE_WINDOW_AFTER + 1)
-    sig_ids = (total, tuple(str(getattr(t, "id", f"obj:{id(t)}")) for t in tracks[sig_start:sig_end]))
+    sig_ids = (total, tuple(str(getattr(t, "id", None) or f"obj:{id(t)}") for t in tracks[sig_start:sig_end]))
     sig = (sig_ids, current_idx)
     prev_sig = getattr(app, "_queue_drawer_render_sig", None)
     if prev_sig == sig and list_box.get_first_child() is not None:

@@ -52,6 +52,15 @@ def on_track_selected(self, box, row):
             cb.set_active(not cb.get_active())
         return
     idx = row.get_index()
+    if getattr(self, "current_remote_playlist", None) is not None:
+        tracks = list(getattr(self, "current_track_list", []) or [])
+        if 0 <= idx < len(tracks):
+            selected = tracks[idx]
+            for position, track in enumerate(getattr(self, "album_track_source", []) or []):
+                if track is selected:
+                    from actions.playlist_playback import start_playlist
+                    start_playlist(self, start_position=position, track_id=selected.id)
+                    return
     view_src = getattr(self, "_track_view_source", None)
     if view_src:
         self.playback_source = dict(view_src)
